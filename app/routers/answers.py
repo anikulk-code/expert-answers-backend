@@ -2,6 +2,14 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import datetime
+from app.services.youtube_service import (
+    search_videos, 
+    format_video_link, 
+    parse_date_range,
+    extract_timestamp_from_description,
+    get_channel_details,
+    infer_region_from_channel
+)
 
 router = APIRouter()
 
@@ -29,19 +37,69 @@ async def get_answers(
     
     **Version 0**: Uses YouTube Search API
     """
-    # TODO: Implement YouTube API integration
-    # For now, return placeholder response
+    try:
+        # Build search query (combine topic and author if provided)
+        query = topic
+        if author:
+            query = f"{author} {topic}"
+        
+        # Parse date range
+        published_after, published_before = parse_date_range(dateRange)
+        
+        # Search YouTube
+        videos = search_videos(
+            query=query,
+            max_results=count,
+            published_after=published_after,
+            published_before=published_before
+        )
+        
+        # Format response
+        results = []
+        # Cache channel details to avoid multiple API calls for same channel
+        channel_cache = {}
+        
+        for video in videos:
+            # Parse published date
+            published_date = datetime.fromisoformat(
+                video['publishedAt'].replace('Z', '+00:00')
+            ).strftime('%Y-%m-%d')
+            
+            # Extract timestamp from description
+            timestamp = extract_timestamp_from_description(
+                video.get('description', ''),
+                video.get('title', '')
+            ) or "00:00:00"
+            
+            # Get region information
+            region = None
+            channel_id = video.get('channelId')
+            if channel_id:
+                # Check cache first
+                if channel_id not in channel_cache:
+                    channel_cache[channel_id] = get_channel_details(channel_id)
+                
+                channel_details = channel_cache[channel_id]
+                region = infer_region_from_channel(
+                    video.get('channelTitle', ''),
+                    channel_details
+                )
+            
+            result = {
+                "videoLink": format_video_link(video['videoId']),
+                "time": timestamp,
+                "speakers": video['channelTitle'],
+                "date": published_date,
+                "region": region,
+                "score": None,  # Version 0: Not calculated yet
+                "answerViewPoint": None  # Version 0: Not determined yet
+            }
+            results.append(result)
+        
+        return results
     
-    # Example response structure
-    return [
-        {
-            "videoLink": "https://youtube.com/watch?v=placeholder",
-            "time": "00:00:00",
-            "speakers": author or "Expert",
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "region": None,
-            "score": None,
-            "answerViewPoint": None
-        }
-    ]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching videos: {str(e)}")
 
