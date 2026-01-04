@@ -89,6 +89,33 @@ def format_video_link(video_id: str) -> str:
     """Format video ID into YouTube URL"""
     return f"https://www.youtube.com/watch?v={video_id}"
 
+def get_video_thumbnail(video_id: str) -> Optional[str]:
+    """
+    Get thumbnail URL for a video
+    
+    Args:
+        video_id: YouTube video ID
+    
+    Returns:
+        Thumbnail URL or None if error
+    """
+    try:
+        service = get_youtube_service()
+        request = service.videos().list(
+            part='snippet',
+            id=video_id
+        )
+        response = request.execute()
+        
+        if response.get('items'):
+            thumbnails = response['items'][0]['snippet']['thumbnails']
+            # Prefer medium quality, fallback to default
+            return thumbnails.get('medium', {}).get('url') or thumbnails.get('default', {}).get('url', '')
+    except Exception as e:
+        print(f"Error fetching thumbnail: {e}")
+    
+    return None
+
 def parse_date_range(date_range: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """
     Parse date range string into published_after and published_before
