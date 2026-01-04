@@ -1,0 +1,133 @@
+{
+  "version": "1.0",
+  "description": "Golden evaluation set for Expert Answers API",
+  "queries": [
+    {
+      "id": "q1",
+      "query": "Why should I care about spirituality?",
+      "description": "Tests basic question matching",
+      "expected_answers": [
+        {
+          "question": "Why should I strive for enlightenment?",
+          "url_pattern": "youtube.com",
+          "min_rank": 1,
+          "required": true
+        },
+        {
+          "question": "Is the result of Self Realization/Illumination \"spiritual retreat\"? What do you get out of the Realization?",
+          "url_pattern": "youtube.com",
+          "min_rank": 2,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 1,
+      "max_results_to_check": 2
+    },
+    {
+      "id": "q2",
+      "query": "What is the nature of consciousness?",
+      "description": "Tests philosophical concept matching",
+      "expected_answers": [
+        {
+          "question": "How can we be sure that consciousness is not manufactured by the brain?",
+          "url_pattern": "youtube.com",
+          "min_rank": 1,
+          "required": true
+        },
+        {
+          "question": "Why is consciousness considered to be different from the mind?",
+          "url_pattern": "youtube.com",
+          "min_rank": 2,
+          "required": true
+        }, 
+        {
+          "question": "Can consciousness truly be objectified and recognized directly?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": true
+        },  
+        {
+          "question": "Is consciousness static, or is it a process?",
+          "url_pattern": "youtube.com",
+          "min_rank": 4,
+          "required": true
+        },
+        {
+            "question": "What is the relationship between Maya and Chit (consciousness)?",
+            "url_pattern": "youtube.com",
+            "min_rank": 5,
+            "required": false
+        } 
+      ],
+      "min_relevant_count": 4,
+      "max_results_to_check": 5
+    },
+    {
+      "id": "q3",
+      "query": "How does Vedanta view suffering?",
+      "description": "Tests specific concept matching",
+      "expected_answers": [
+        {
+          "question": "Why is there so much suffering in the world?",
+          "url_pattern": "youtube.com",
+          "min_rank": 2,
+          "required": true
+        },  
+        {
+          "question": "My heart is troubled by the suffering around me. How can I hold on to Advaita?",
+          "url_pattern": "youtube.com",
+          "min_rank": 2,
+          "required": true
+        },
+        {
+          "question": "Does suffering bring us closer to spirituality?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": false
+        },  
+        {
+          "question": "Why does the play of Consciousness give so many negative experiences?",
+          "url_pattern": "youtube.com",
+          "min_rank": 4,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 3,
+      "max_results_to_check": 4
+    },
+    {
+      "id": "q4",
+      "query": "In Vedanta, are we ignoring the problems of society for the sake of spirituality?",
+      "description": "Tests complex, multi-part question matching",
+      "expected_answers": [
+        {
+          "question": "In Vedanta, are we ignoring the problems of society for the sake of spirituality?",
+          "url_pattern": "youtube.com",
+          "min_rank": 1,
+          "required": true
+        },
+        {
+          "question": "What does Vedanta say about justice in society?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": true
+        },
+        {
+          "question": "Is spirituality an escape from worldly responsibility?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": true
+        },  
+        {
+          "question": "If everything is Brahman, why help others?",
+          "url_pattern": "youtube.com",
+          "min_rank": 5,
+          "required": false
+        }   
+      ],
+      "min_relevant_count": 1,
+      "max_results_to_check": 5
+    }
+  ]
+}
+
