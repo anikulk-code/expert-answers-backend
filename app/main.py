@@ -10,7 +10,7 @@ load_dotenv()
 app = FastAPI(
     title="Expert Answers API",
     description="API for retrieving expert answers from YouTube video segments",
-    version="0.1.0"
+    version="0.1.1"  # Updated for Azure deployment
 )
 
 # CORS middleware
