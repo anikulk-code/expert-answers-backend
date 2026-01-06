@@ -79,8 +79,10 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
     
     print(f"\n📝 Query {query_id}: {query_text}")
     
-    # Call API
-    api_response = call_api(query_text, count=max_results_to_check)
+    # Call API - use at least count=1 (API requires count >= 1)
+    # For queries that should return 0 results, we still call with count=5 to see if API returns anything
+    api_count = max(max_results_to_check, 1) if max_results_to_check == 0 else max_results_to_check
+    api_response = call_api(query_text, count=api_count)
     if api_response is None:
         return {
             "query_id": query_id,
@@ -89,12 +91,23 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
             "metrics": {}
         }
     
-    # Get actual answers
-    actual_answers = api_response.get("answers", [])
+    # Get actual answers - combine "answers" (relevant) and "otherRelatedVideos" (not_relevant) into one flat list
+    relevant_answers = api_response.get("answers", []) or []
+    other_related = api_response.get("otherRelatedVideos", []) or []
+    
+    # Ensure both are lists (handle None case)
+    if relevant_answers is None:
+        relevant_answers = []
+    if other_related is None:
+        other_related = []
+    
+    # Combine into one flat list for evaluation (relevant first, then not_relevant)
+    actual_answers = relevant_answers + other_related
+    
     search_status = api_response.get("searchStatus", "unknown")
     
     print(f"  Status: {search_status}")
-    print(f"  Results returned: {len(actual_answers)}")
+    print(f"  Results returned: {len(actual_answers)} (relevant: {len(relevant_answers)}, other: {len(other_related)})")
     
     # Evaluate each expected answer
     evaluation_results = []

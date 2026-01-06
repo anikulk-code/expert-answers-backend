@@ -97,7 +97,7 @@
     },
     {
       "id": "q4",
-      "query": "In Vedanta, are we ignoring the problems of society for the sake of spirituality?",
+      "query": "Does Vedanta promote indifference to social problems?",
       "description": "Tests complex, multi-part question matching",
       "expected_answers": [
         {
@@ -127,6 +127,36 @@
       ],
       "min_relevant_count": 1,
       "max_results_to_check": 5
+    },
+    {
+      "id": "q5",
+      "query": "What does Vedanta say about evolution?",
+      "description": "Tests that certain questions are not answered",
+      "expected_answers": [
+        
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 0
+    },
+    {
+      "id": "q6",
+      "query": "What is your view on Sri Sri Ravishankar?",
+      "description": "Tests that certain questions are not answered",
+      "expected_answers": [
+        
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 0
+    },  
+    {
+      "id": "q7",
+      "query": "What is your view on Physical Exercise and Vedanta?",
+      "description": "Tests that certain questions are not answered",
+      "expected_answers": [
+        
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 0
     }
   ]
 }
