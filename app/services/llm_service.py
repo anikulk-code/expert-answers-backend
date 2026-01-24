@@ -1,6 +1,7 @@
 import os
 import json
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -31,7 +32,9 @@ PRECANNED_QUESTIONS = [
     "Why should I care about spirituality?",
     "What is the nature of consciousness?",
     "How does Vedanta view suffering?",
-    "Does Vedanta promote indifference to social problems?"
+    "Does Vedanta promote indifference to social problems?",
+    "What is vedantic view of evolution?",
+    "How can we better handle stress?"
 ]
 
 def is_precanned_question(user_query: str) -> bool:
@@ -99,14 +102,17 @@ def get_playlist_id(video_id: str) -> Optional[str]:
 
 def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
     """
-    Match user query to questions using LLM with strict relevance filtering
+    Match user query to questions using vector + topics search + LLM filtering.
+    
+    First uses both vector search (semantic similarity) and topics search from Cosmos DB
+    to get candidates, combines and deduplicates them, then applies LLM to filter for relevance.
     
     Args:
         user_query: User's question
-        top_n: Maximum number of top matches to return (may return fewer if not enough highly relevant matches)
+        top_n: Maximum number of top matches to return
     
     Returns:
-        List of matched questions with url and timestamp (only highly relevant ones)
+        List of matched questions with video_link and timestamp
     """
     # Check cache only for precanned questions (for idempotency)
     should_cache = is_precanned_question(user_query)
@@ -116,39 +122,136 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
         if cache_key in _match_cache:
             return _match_cache[cache_key]
     
-    questions = load_questions()
+    # Step 1: Get candidates from both vector search AND topics search (in parallel)
+    from app.services.search_service import vector_search, topic_entity_search
     
+    # Run vector and topic searches in parallel for better performance
+    # Only get questions WITH video_link (answered questions) for main search
+    print(f"   🔄 Running vector and topic searches in parallel...")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(vector_search, user_query, 50, True)
+        topic_future = executor.submit(topic_entity_search, user_query, 50, True)
+        
+        # Wait for both to complete
+        vector_candidates = vector_future.result()
+        topic_candidates = topic_future.result()
+    
+    print(f"   📊 Vector search: {len(vector_candidates)} candidates")
+    print(f"   📊 Topics search: {len(topic_candidates)} candidates")
+    
+    # Find max topic score for normalization
+    max_topic_score = 0.0
+    for candidate in topic_candidates:
+        topic_score = candidate.get("topic_entity_score", 0.0) or 0.0
+        if topic_score > max_topic_score:
+            max_topic_score = topic_score
+    if max_topic_score == 0.0:
+        max_topic_score = 4.0
+    else:
+        max_topic_score = max(max_topic_score * 1.2, 4.0)
+    
+    # Combine and deduplicate candidates by question ID, with normalized scoring
+    candidates_dict = {}
+    
+    # Add vector search results first (vector scores already 0-1)
+    for candidate in vector_candidates:
+        candidate_id = candidate.get('id')
+        if candidate_id:
+            vector_score = candidate.get("vector_score", 0.0) or 0.0
+            candidates_dict[candidate_id] = {
+                **candidate,
+                "_normalized_vector": vector_score,
+                "_normalized_topic": 0.0
+            }
+    
+    # Add topic search results (normalize topic scores)
+    for candidate in topic_candidates:
+        candidate_id = candidate.get('id')
+        if candidate_id:
+            topic_score = candidate.get("topic_entity_score", 0.0) or 0.0
+            normalized_topic = topic_score / max_topic_score if max_topic_score > 0 else 0.0
+            normalized_topic = min(normalized_topic, 1.0)
+            
+            if candidate_id in candidates_dict:
+                # Merge: add topic score to existing
+                candidates_dict[candidate_id]['topic_entity_score'] = topic_score
+                candidates_dict[candidate_id]['_normalized_topic'] = normalized_topic
+                # Combined normalized score with bonus for appearing in both
+                normalized_vector = candidates_dict[candidate_id].get("_normalized_vector", 0.0)
+                combined_normalized = max(normalized_vector, normalized_topic) * 1.1
+                candidates_dict[candidate_id]['_combined_normalized'] = min(combined_normalized, 1.0)
+            else:
+                # New item from topics search only
+                candidates_dict[candidate_id] = {
+                    **candidate,
+                    "_normalized_vector": 0.0,
+                    "_normalized_topic": normalized_topic,
+                    "_combined_normalized": normalized_topic
+                }
+    
+    # Sort by combined normalized score and take top 20
+    candidates = list(candidates_dict.values())
+    candidates.sort(key=lambda x: x.get("_combined_normalized", 0.0), reverse=True)
+    candidates = candidates[:20]  # Limit to top 20 before sending to LLM
+    
+    # Remove internal scoring fields before sending to LLM
+    for candidate in candidates:
+        candidate.pop("_normalized_vector", None)
+        candidate.pop("_normalized_topic", None)
+        candidate.pop("_combined_normalized", None)
+    
+    print(f"   📊 Combined unique candidates: {len(candidates_dict)} total, {len(candidates)} top candidates (normalized) sent to LLM")
+    
+    if not candidates:
+        return []
+    
+    # Convert Cosmos DB structure to format expected by LLM (questionText -> question, video_link -> url)
     # Format questions for LLM context
     questions_text = "\n".join([
-        f"{i+1}. {q['question']}"
-        for i, q in enumerate(questions)
+        f"{i+1}. {q.get('questionText', q.get('question', ''))}"
+        for i, q in enumerate(candidates)
     ])
     
-    # Step 1: Get initial candidates (more than we need)
-    initial_matches = min(top_n * 3, 15)  # Get more candidates for filtering
+    print(f"   📝 Sending {len(candidates)} candidates to LLM for filtering")
+    print(f"   📝 First 3 candidate questions:")
+    for i, q in enumerate(candidates[:3]):
+        print(f"      {i+1}. {q.get('questionText', q.get('question', ''))[:60]}...")
     
+    # Step 2: LLM filtering - filter candidates for relevance
     prompt = f"""You are helping match user questions to existing Q&A video segments.
 
 User's question: "{user_query}"
 
-Here are all available questions from Q&A videos (519 total):
+Here are candidate questions from Q&A videos (pre-filtered by vector search + topics search, {len(candidates)} total):
 
 {questions_text}
 
-Find up to {initial_matches} question numbers that could potentially match the user's question.
-Return ONLY a valid JSON array with the question numbers (1-based index), ordered by potential relevance.
-Example: [5, 23, 101]
+Find question numbers that are relevant to the user's question. Return an EMPTY array [] only if:
+- The user's question is gibberish, nonsense, or meaningless
+- The user's question is completely unrelated to spirituality/Vedanta
+- None of the questions are even somewhat related to what the user is asking
+
+You should include questions that:
+- Directly answer the user's question (highest priority)
+- Address the same core topic or concept, even if from a different angle
+- Explore related aspects of the same topic
+- Are semantically similar or cover overlapping themes
+
+Return up to {top_n} question numbers that are relevant to the user's question, ordered by relevance (most relevant first).
+Return ONLY a valid JSON array with the question numbers (1-based index), ordered by relevance, or [] if nothing is relevant.
+Example: [5, 23, 101] or []
 
 Return only the JSON array, no other text:"""
 
     try:
         openai_client = get_openai_client()
         
-        # Step 1: Get candidates (temperature=0 for deterministic results)
+        # LLM filtering: Filter candidates for relevance (temperature=0 for deterministic results)
+        # Using GPT-4o for better semantic understanding of question matching
         response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that matches questions. Always return valid JSON arrays."},
+                {"role": "system", "content": "You are a question matcher that finds relevant questions. Include questions that directly answer the query, address the same topic, or explore related concepts. Return [] (empty array) only if the question is gibberish, completely unrelated, or if no questions are relevant. Always return valid JSON arrays."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0,  # Set to 0 for deterministic/idempotent results
@@ -157,6 +260,7 @@ Return only the JSON array, no other text:"""
         
         # Parse response
         result_text = response.choices[0].message.content.strip()
+        print(f"   🤖 LLM raw response: {result_text}")
         if result_text.startswith("```"):
             result_text = result_text.split("```")[1]
             if result_text.startswith("json"):
@@ -164,90 +268,88 @@ Return only the JSON array, no other text:"""
         result_text = result_text.strip()
         
         indices = json.loads(result_text)
+        print(f"   🤖 LLM returned {len(indices)} indices: {indices}")
         
         # Get candidate questions (deduplicate by URL to avoid same question appearing multiple times)
-        candidates = []
+        filtered_candidates = []
         seen_urls = set()
-        for idx in indices[:initial_matches]:
-            if 1 <= idx <= len(questions):
-                question_data = questions[idx - 1].copy()
-                question_url = question_data.get('url', '')
-                # Extract base URL (without timestamp) for deduplication
-                base_url = question_url.split('&t=')[0] if '&t=' in question_url else question_url
-                if base_url not in seen_urls:
-                    seen_urls.add(base_url)
-                    question_data['question_text'] = question_data['question']
-                    candidates.append(question_data)
+        skipped_no_url = 0
+        skipped_invalid_idx = 0
+        skipped_duplicate_url = 0
+        skipped_out_of_range = 0
         
-        if not candidates:
-            return []
+        print(f"   🔍 Processing {len(indices)} indices from LLM: {indices}")
         
-        # Step 2: Strict relevance validation - only keep highly relevant matches
-        candidates_text = "\n".join([
-            f"{i+1}. {c['question']}"
-            for i, c in enumerate(candidates)
-        ])
+        for idx in indices[:top_n]:  # Limit to top_n
+            if not isinstance(idx, int):
+                try:
+                    idx = int(idx)
+                except:
+                    print(f"   ⚠️  Invalid index type: {idx} (type: {type(idx)})")
+                    skipped_invalid_idx += 1
+                    continue
+            
+            if not (1 <= idx <= len(candidates)):
+                print(f"   ⚠️  Index {idx} out of range (1-{len(candidates)})")
+                skipped_out_of_range += 1
+                continue
+                
+            question_data = candidates[idx - 1].copy()
+            question_text = question_data.get('questionText', question_data.get('question', ''))
+            
+            # Use video_link from Cosmos DB (convert to 'url' for compatibility)
+            question_url = question_data.get('video_link', '')
+            if not question_url:
+                skipped_no_url += 1
+                print(f"   ⚠️  Skipping candidate {idx} (no video_link): {question_text[:50]}...")
+                continue
+            
+            # Extract base URL (without timestamp) for deduplication
+            # NOTE: This means multiple questions from same video (different timestamps) will be deduplicated
+            base_url = question_url.split('&t=')[0] if '&t=' in question_url else question_url
+            if base_url in seen_urls:
+                skipped_duplicate_url += 1
+                print(f"   ⚠️  Skipping candidate {idx} (duplicate base URL): {question_text[:50]}... (URL: {base_url[:50]}...)")
+                continue
+            
+            seen_urls.add(base_url)
+            # Convert Cosmos DB structure to expected format
+            question_data['url'] = question_url  # Add 'url' field for compatibility
+            question_data['question_text'] = question_text
+            question_data['question'] = question_text  # Also add 'question' field
+            # Extract timestamp from video_link if present
+            if '&t=' in question_url:
+                timestamp_str = question_url.split('&t=')[1]
+                # Convert seconds to HH:MM:SS format
+                try:
+                    seconds = int(timestamp_str.replace('s', ''))
+                    hours = seconds // 3600
+                    minutes = (seconds % 3600) // 60
+                    secs = seconds % 60
+                    question_data['timestamp'] = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+                except:
+                    question_data['timestamp'] = '00:00:00'
+            else:
+                question_data['timestamp'] = '00:00:00'
+            question_data['match_rank'] = len(filtered_candidates) + 1
+            filtered_candidates.append(question_data)
+            print(f"   ✅ Added candidate {idx}: {question_text[:50]}... (URL: {base_url[:50]}...)")
         
-        validation_prompt = f"""You are helping match user questions to existing Q&A video segments.
-
-User's question: "{user_query}"
-
-Candidate matches:
-{candidates_text}
-
-Return question numbers (1-based from the candidate list above) that are relevant to the user's question.
-Include questions that are semantically similar or address related topics.
-
-Return up to {top_n} question numbers, ordered by relevance (most relevant first).
-Return ONLY a valid JSON array with the question numbers from the candidate list (1-based).
-Example: [1, 3, 5]
-
-Return only the JSON array, no other text:"""
+        # Summary of what was skipped
+        if skipped_no_url > 0:
+            print(f"   ⚠️  Skipped {skipped_no_url} candidates due to missing video_link")
+        if skipped_invalid_idx > 0:
+            print(f"   ⚠️  Skipped {skipped_invalid_idx} candidates due to invalid index format")
+        if skipped_out_of_range > 0:
+            print(f"   ⚠️  Skipped {skipped_out_of_range} candidates due to out-of-range indices")
+        if skipped_duplicate_url > 0:
+            print(f"   ⚠️  Skipped {skipped_duplicate_url} candidates due to duplicate base URLs (same video, different timestamps)")
+        if len(indices) == 0:
+            print(f"   ⚠️  LLM returned empty array - no relevant questions found")
+        print(f"   ✅ LLM filtered to {len(filtered_candidates)} final candidates (from {len(indices)} LLM indices)")
         
-        validation_response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful relevance filter. Return up to the requested number of relevant matches. Always return valid JSON arrays."},
-                {"role": "user", "content": validation_prompt}
-            ],
-            temperature=0,  # Set to 0 for deterministic/idempotent results
-            max_tokens=150  # Increased to allow for more results
-        )
-        
-        validation_text = validation_response.choices[0].message.content.strip()
-        if validation_text.startswith("```"):
-            validation_text = validation_text.split("```")[1]
-            if validation_text.startswith("json"):
-                validation_text = validation_text[4:]
-        validation_text = validation_text.strip()
-        
-        validated_indices = json.loads(validation_text)
-        
-        # Handle empty array (no relevant matches found)
-        if not validated_indices or len(validated_indices) == 0:
-            return []
-        
-        # Deduplicate indices (in case LLM returns same index multiple times)
-        seen_indices = set()
-        unique_indices = []
-        for idx in validated_indices:
-            if idx not in seen_indices and 1 <= idx <= len(candidates):
-                seen_indices.add(idx)
-                unique_indices.append(idx)
-        
-        # Get final matches (convert candidate list index to actual question, deduplicate by URL)
-        final_matches = []
-        seen_urls = set()
-        for idx in unique_indices[:top_n]:
-            if 1 <= idx <= len(candidates):
-                match = candidates[idx - 1].copy()
-                # Deduplicate by base URL (same video, different timestamps are still considered duplicates)
-                match_url = match.get('url', '')
-                base_url = match_url.split('&t=')[0] if '&t=' in match_url else match_url
-                if base_url not in seen_urls:
-                    seen_urls.add(base_url)
-                    match['match_rank'] = len(final_matches) + 1
-                    final_matches.append(match)
+        # Return filtered candidates directly (no second validation step)
+        final_matches = filtered_candidates
         
         # Cache the result only for precanned questions (for idempotency)
         if should_cache and cache_key:
@@ -256,7 +358,9 @@ Return only the JSON array, no other text:"""
         return final_matches
     
     except Exception as e:
-        print(f"Error in LLM matching: {e}")
+        import traceback
+        print(f"❌ Error in LLM matching: {e}")
+        print(f"   Traceback: {traceback.format_exc()}")
         # Fallback: return empty or use simple keyword matching
         return []
 
@@ -381,3 +485,217 @@ Return ONLY the question text, nothing else."""
         print(f"Error generating related question: {e}")
         return None
 
+def find_similar_questions_for_upvote(user_query: str, num_questions: int = 3) -> List[Dict]:
+    """
+    Find similar questions from Cosmos DB using topics search + LLM filtering.
+    Returns questions with their text and vote counts.
+    
+    Uses the same logic as main search: topics search first, then LLM filtering.
+    
+    Args:
+        user_query: User's question
+        num_questions: Number of similar questions to return
+    
+    Returns:
+        List of dicts with 'question' (str) and 'upvotes' (int)
+    """
+    # Step 1: Get candidates from Cosmos DB using topics search
+    # For related questions (upvoting), we want questions WITHOUT video_link (unanswered questions)
+    from app.services.search_service import topic_entity_search
+    
+    # Get top candidates from topics search - only unanswered questions (no video_link)
+    candidates = topic_entity_search(user_query, top_n=30, require_video_link=False)  # Get more candidates than we need
+    
+    if not candidates:
+        return []
+    
+    # Format questions for LLM context
+    questions_text = "\n".join([
+        f"{i+1}. {q.get('questionText', q.get('question', ''))}"
+        for i, q in enumerate(candidates)
+    ])
+    
+    prompt = f"""A user asked this question: "{user_query}"
+
+We want to show them similar questions from our database that they might want to upvote.
+
+Here are candidate questions from Q&A videos (pre-filtered by topic matching, {len(candidates)} total):
+
+{questions_text}
+
+Find {num_questions} question numbers (1-based index) from the list above that are most similar or related to the user's question.
+These should be questions that explore similar topics, concepts, or themes, even if they don't directly answer it.
+
+Return ONLY a valid JSON array with the question numbers, ordered by similarity.
+Example: [5, 12, 23]
+
+Return only the JSON array, no other text:"""
+    
+    try:
+        openai_client = get_openai_client()
+        
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that finds similar questions. Always return valid JSON arrays."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=50
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        result_text = result_text.strip()
+        
+        indices = json.loads(result_text)
+        
+        # Get similar questions with votes from Cosmos DB
+        similar_questions = []
+        for idx in indices[:num_questions]:
+            if 1 <= idx <= len(candidates):
+                question_data = candidates[idx - 1]
+                question_text = question_data.get('questionText', question_data.get('question', ''))
+                if question_text:
+                    # Get vote count from Cosmos DB document
+                    upvotes = question_data.get('voteUp', question_data.get('votes', question_data.get('upvotes', 0)))
+                    similar_questions.append({
+                        'question': question_text,
+                        'upvotes': upvotes
+                    })
+        
+        return similar_questions
+    
+    except Exception as e:
+        print(f"Error finding similar questions: {e}")
+        return []
+
+def check_youtube_video_relevance(user_query: str, video_title: str, video_description: str = "") -> Dict[str, any]:
+    """
+    Check if a YouTube video is relevant to the user's query using LLM.
+    
+    Args:
+        user_query: User's original question
+        video_title: YouTube video title
+        video_description: YouTube video description (optional)
+    
+    Returns:
+        Dictionary with 'relevant' (bool) and 'confidence' (float 0-10)
+    """
+    try:
+        openai_client = get_openai_client()
+        
+        description_text = video_description[:500] if video_description else ""  # Limit description length
+        
+        prompt = f"""Check if this YouTube video is relevant to the user's question.
+
+User's question: "{user_query}"
+
+Video title: "{video_title}"
+Video description: "{description_text}"
+
+CRITICAL STRICT RULES - Only mark as relevant if ALL of these conditions are met:
+1. The video MUST directly address the EXACT specific topic, concept, or question asked
+2. If the user asks about a specific topic (e.g., "evolution", "stress", "Sri Sri Ravishankar"), the video title/description MUST explicitly mention or discuss that specific topic
+3. General Vedanta videos that are tangentially related but don't address the specific question should be marked as NOT relevant
+4. Videos about related but different topics (e.g., "Advaita" when asked about "evolution") should be marked as NOT relevant
+5. Videos that explore similar themes but don't answer the specific question should be marked as NOT relevant
+
+Return a JSON object with:
+- "relevant": true/false (true ONLY if video directly addresses the specific question/topic with high confidence)
+- "confidence": number from 0-10 where:
+  * 9-10 = Directly answers the exact question/topic
+  * 7-8 = Highly relevant and addresses the specific topic (but may be slightly different angle)
+  * 5-6 = Somewhat related but different topic or too general (NOT relevant enough)
+  * 0-4 = Not relevant or completely different topic
+
+Examples:
+- User asks "What is vedantic view of evolution?" and video is "Vedanta and Evolution" → relevant: true, confidence: 9
+- User asks "What is vedantic view of evolution?" and video is "Is Advaita evolving or complete?" → relevant: false, confidence: 4 (related concept but different topic - evolution vs Advaita's nature)
+- User asks "What is vedantic view of evolution?" and video is "How does the One appear as Many?" → relevant: false, confidence: 1 (different topic)
+- User asks "What is vedantic view of evolution?" and video is "What is the Purpose of Life?" → relevant: false, confidence: 2 (different topic)
+- User asks "What is vedantic view of evolution?" and video is "Vedanta Philosophy Overview" → relevant: false, confidence: 3 (too general, doesn't address evolution)
+
+Be VERY STRICT. Only mark as relevant (true) if the video actually discusses the specific topic in the user's question. When in doubt, mark as NOT relevant.
+
+Return ONLY the JSON object, no other text:"""
+
+        # Using GPT-4o for better semantic understanding of video relevance
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a strict relevance checker. Only mark videos as relevant if they DIRECTLY address the specific topic in the user's question. When in doubt, mark as NOT relevant. Always return valid JSON objects with 'relevant' (boolean) and 'confidence' (number 0-10)."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=100
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        result_text = result_text.strip()
+        
+        result = json.loads(result_text)
+        return {
+            "relevant": result.get("relevant", False),
+            "confidence": float(result.get("confidence", 0))
+        }
+    
+    except Exception as e:
+        print(f"Error checking video relevance: {e}")
+        # Default to not relevant if error
+        return {"relevant": False, "confidence": 0.0}
+
+def distill_question_for_search(user_query: str) -> str:
+    """
+    Distill a user question to its essential keywords for YouTube search.
+    Extracts the core topic/concept from the question.
+    
+    Args:
+        user_query: User's question
+    
+    Returns:
+        Distilled search query string
+    """
+    try:
+        openai_client = get_openai_client()
+        
+        prompt = f"""Extract the essential keywords from this question for a YouTube video search. 
+Remove filler words and focus on the core topic or concept.
+
+Question: "{user_query}"
+
+Return ONLY the essential keywords as a short search query (2-5 words max).
+Examples:
+- "What does Vedanta say about evolution?" → "Vedanta evolution"
+- "How does consciousness work?" → "consciousness"
+- "What is your view on Sri Sri Ravishankar?" → "Sri Sri Ravishankar"
+- "Why should I care about spirituality?" → "spirituality"
+
+Return only the keywords, no other text:"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that extracts search keywords. Return only the keywords."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=30
+        )
+        
+        distilled = response.choices[0].message.content.strip()
+        # Clean up if it has quotes
+        distilled = distilled.strip('"').strip("'").strip()
+        return distilled if distilled else user_query
+    
+    except Exception as e:
+        print(f"Error distilling question: {e}")
+        # Fallback: return original query
+        return user_query

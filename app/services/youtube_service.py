@@ -275,3 +275,45 @@ def infer_region_from_channel(channel_title: str, channel_details: Optional[Dict
     
     return None
 
+def search_sarvapriyananda_videos(query: str, max_results: int = 2) -> List[Dict]:
+    """
+    Search for videos from Swami Sarvapriyananda's channel.
+    
+    Args:
+        query: Search query string
+        max_results: Maximum number of results (default: 2)
+    
+    Returns:
+        List of video dictionaries
+    """
+    try:
+        # Search with channel name in query to prioritize Swami Sarvapriyananda's videos
+        search_query = f"{query} Swami Sarvapriyananda"
+        videos = search_videos(
+            query=search_query,
+            max_results=max_results * 3,  # Get more to filter
+            channel_id=None  # We'll filter by channel name in results
+        )
+        
+        # Filter to only include videos from Swami Sarvapriyananda's channel
+        # Common channel names/variations
+        sarvapriyananda_channels = [
+            "swami sarvapriyananda",
+            "vedanta new york",
+            "vedanta society of new york"
+        ]
+        
+        filtered_videos = []
+        for video in videos:
+            channel_title = video.get('channelTitle', '').lower()
+            if any(channel in channel_title for channel in sarvapriyananda_channels):
+                filtered_videos.append(video)
+            if len(filtered_videos) >= max_results:
+                break
+        
+        # If we didn't get enough filtered results, return what we have
+        return filtered_videos[:max_results]
+    
+    except Exception as e:
+        print(f"Error searching Sarvapriyananda videos: {e}")
+        return []
