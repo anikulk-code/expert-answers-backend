@@ -1,6 +1,7 @@
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import os
+import ssl
 from typing import List, Optional, Dict
 from datetime import datetime
 
@@ -78,6 +79,9 @@ def search_videos(
         
         return videos
     
+    except ssl.SSLError as e:
+        print(f"SSL error searching YouTube: {e}")
+        raise Exception(f"Network error: {str(e)}")
     except HttpError as e:
         print(f"YouTube API error: {e}")
         raise Exception(f"YouTube API error: {str(e)}")
@@ -111,8 +115,15 @@ def get_video_thumbnail(video_id: str) -> Optional[str]:
             thumbnails = response['items'][0]['snippet']['thumbnails']
             # Prefer medium quality, fallback to default
             return thumbnails.get('medium', {}).get('url') or thumbnails.get('default', {}).get('url', '')
+    except ssl.SSLError as e:
+        # Log SSL errors but don't crash - these are often transient network issues
+        print(f"SSL error fetching thumbnail for {video_id}: {e}")
+    except HttpError as e:
+        # Log HTTP errors from YouTube API
+        print(f"YouTube API error fetching thumbnail for {video_id}: {e}")
     except Exception as e:
-        print(f"Error fetching thumbnail: {e}")
+        # Log other errors
+        print(f"Error fetching thumbnail for {video_id}: {e}")
     
     return None
 
@@ -223,8 +234,14 @@ def get_channel_details(channel_id: str) -> Optional[Dict]:
                 'country': snippet.get('country', ''),
                 'customUrl': snippet.get('customUrl', '')
             }
+    except ssl.SSLError as e:
+        # Log SSL errors but don't crash
+        print(f"SSL error fetching channel details for {channel_id}: {e}")
+    except HttpError as e:
+        # Log HTTP errors from YouTube API
+        print(f"YouTube API error fetching channel details for {channel_id}: {e}")
     except Exception as e:
-        print(f"Error fetching channel details: {e}")
+        print(f"Error fetching channel details for {channel_id}: {e}")
     
     return None
 

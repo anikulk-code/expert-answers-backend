@@ -158,6 +158,14 @@ Each question document has this structure:
 - Verify the endpoint URL is correct
 - Check if your IP is blocked by firewall rules
 
+### Error: "Request originated from IP ... through public internet. This is blocked by your Cosmos DB account firewall settings"
+- **Cause**: Cosmos DB firewall is blocking your Azure App Service IP
+- **Solution**: 
+  1. Go to Azure Portal → Cosmos DB account → **Networking**
+  2. Enable **"Allow Azure services and resources to access this account"** (recommended)
+  3. Or add your App Service's outbound IP addresses to the firewall rules
+  4. See `COSMOS_DB_FIREWALL_FIX.md` for detailed steps
+
 ## Next Steps
 
 1. Test the API endpoints:
