@@ -76,9 +76,42 @@ Build an app that allows users to ask questions, where answers are specific segm
 - Focus on Q&A videos
 - Extract timestamps from comments/descriptions
 - Match questions to video segments
+- **Hybrid Search**: Vector search + BM25 (keyword) search with query expansion
+- **LLM Verification**: Relevance ranking and confidence scoring
+
+#### Search Flow and Fallback Mechanisms
+
+**Primary Search:**
+1. User enters their own question
+2. System performs hybrid search (vector + BM25) with expanded terms
+3. LLM verifies and ranks results by relevance
+4. Returns matching Q&A segments with timestamps
+
+**Fallback When No Direct Answer Found:**
+1. **Related YouTube Lectures**: Show 2-3 full YouTube lectures that could be related to the core terms extracted from the user's query
+   - Uses core terms and synonyms to find relevant full-length videos
+   - Provides broader context when specific Q&A segments aren't available
+
+2. **Related Tags**: Show tags related to the core terms for exploration
+   - Allows users to browse questions by topic/tag
+   - Helps users discover related content through topic-based navigation
+
+3. **Related Questions & User Engagement**:
+   - Display related questions that users can explore
+   - Allow users to upvote related questions (indicates interest/helpfulness)
+   - If no related question exists, allow users to submit their own question
+   - **Note**: Upvoting and question submission require a database (to be implemented in a future version)
 
 ### Version 2: Automatic Transcript Generation 🔄
 
 - Automatic video parsing and transcript generation
 - NLP/ML for question-answer matching, relevance scoring, viewpoint analysis
+
+### Version 3: User Engagement & Database 🔄
+
+- Database for storing:
+  - User-submitted questions
+  - Question upvotes/engagement metrics
+  - User preferences and search history
+- Analytics and insights from user interactions
 

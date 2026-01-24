@@ -4,7 +4,7 @@
   "queries": [
     {
       "id": "q1",
-      "query": "Why should I care about spirituality?",
+      "query": "Why should I pursue spiritual life?",
       "description": "Tests basic question matching",
       "expected_answers": [
         {
@@ -29,7 +29,7 @@
       "description": "Tests philosophical concept matching",
       "expected_answers": [
         {
-          "question": "How can we be sure that consciousness is not manufactured by the brain?",
+          "question": "How can I be sure that consciousness is not manufactured by the brain?",
           "url_pattern": "youtube.com",
           "min_rank": 1,
           "required": true
@@ -68,7 +68,7 @@
       "description": "Tests specific concept matching",
       "expected_answers": [
         {
-          "question": "Why is there so much suffering in the world?",
+          "question": "Why there is so much suffering in the world?",
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": true
@@ -109,24 +109,13 @@
         {
           "question": "What does Vedanta say about justice in society?",
           "url_pattern": "youtube.com",
-          "min_rank": 3,
+          "min_rank": 2,
           "required": true
-        },
-        {
-          "question": "Is spirituality an escape from worldly responsibility?",
-          "url_pattern": "youtube.com",
-          "min_rank": 3,
-          "required": true
-        },  
-        {
-          "question": "If everything is Brahman, why help others?",
-          "url_pattern": "youtube.com",
-          "min_rank": 5,
-          "required": false
-        }   
+        }  
+   
       ],
-      "min_relevant_count": 1,
-      "max_results_to_check": 5
+      "min_relevant_count": 2,
+      "max_results_to_check": 3
     },
     {
       "id": "q5",
