@@ -280,12 +280,9 @@ async def get_answers_v1(
             if include_related:
                 related_question = get_related_question(question, matched_question_texts)
             
-            # Load queue info with similar questions for upvoting
-            # This allows users to see related questions they can upvote, or add their own question
-            # (in case the answers aren't what they're looking for)
-            # Note: We load similar questions here so they're available when the queue is shown
-            queue_info = _build_queue_info(question)
-            
+            # Skip queueInfo on successful hits — it costs extra LLM/Cosmos work.
+            # Frontend lazy-loads via GET /api/answers/v1/queue-info when the user
+            # expands "Not what you're looking for?"
             response = {
                 "answers": results,
                 "relatedQuestion": related_question,
@@ -294,7 +291,7 @@ async def get_answers_v1(
                 "searchStatus": "qa_match",
                 "searchStage": "complete",
                 "suggestedTags": None,
-                "queueInfo": queue_info,
+                "queueInfo": None,
                 "userMessage": None
             }
             
@@ -306,36 +303,9 @@ async def get_answers_v1(
             
             return response
         
-        # Step 2: No Q&A matches found - show tags and queue/upvote options
-        from app.routers.tags import load_tagged_chapters
-        
-        # Get tags
+        # Step 2: No Q&A matches — clear empty state + queue/upvote options.
+        # Tag suggestions via load_tagged_chapters were broken/unused; skip them.
         suggested_tags = None
-        try:
-            chapters = load_tagged_chapters()
-            # Count questions per tag
-            tag_counts: Dict[str, int] = {}
-            for chapter in chapters:
-                primary_tag = chapter.get("primary_tag", "Other")
-                tag_counts[primary_tag] = tag_counts.get(primary_tag, 0) + 1
-            
-            # Convert to list and sort, but move "Other" to the end
-            tags_list = [
-                TagSuggestion(tag=tag, count=count)
-                for tag, count in tag_counts.items()
-            ]
-            
-            # Sort alphabetically, but put "Other" at the end
-            def sort_key(tag_info):
-                if tag_info.tag.lower() == "other":
-                    return (1, tag_info.tag.lower())
-                return (0, tag_info.tag.lower())
-            
-            sorted_tags = sorted(tags_list, key=sort_key)
-            suggested_tags = sorted_tags[:5]  # Top 5 tags
-        except (HTTPException, Exception) as e:
-            print(f"Error loading tags: {e}")
-            suggested_tags = None
         
         # Find similar questions from the database for upvoting (using topics search + LLM)
         # Returns list of dicts with 'question' and 'upvotes'
@@ -418,11 +388,11 @@ async def get_answers_v1(
             "relatedQuestion": None,
             "relatedQuestions": None,
             "youtubeSearchResults": None,
-            "searchStatus": "tags_fallback",
+            "searchStatus": "no_results",
             "searchStage": "complete",
             "suggestedTags": suggested_tags,
             "queueInfo": queue_info,
-            "userMessage": "We couldn't find your question in our database. You can upvote similar questions or add your question to our queue."
+            "userMessage": "No related Q&A found for this question. You can upvote a similar unanswered question below, or add yours to the queue."
         }
     
     except ValueError as e:

@@ -95,37 +95,21 @@ def format_video_link(video_id: str) -> str:
 
 def get_video_thumbnail(video_id: str) -> Optional[str]:
     """
-    Get thumbnail URL for a video
+    Get thumbnail URL for a video.
+
+    Uses YouTube's public image CDN (no Data API call) so answer responses
+    stay fast and do not depend on API quotas or SSL flakiness.
     
     Args:
         video_id: YouTube video ID
     
     Returns:
-        Thumbnail URL or None if error
+        Thumbnail URL or None if video_id is empty
     """
-    try:
-        service = get_youtube_service()
-        request = service.videos().list(
-            part='snippet',
-            id=video_id
-        )
-        response = request.execute()
-        
-        if response.get('items'):
-            thumbnails = response['items'][0]['snippet']['thumbnails']
-            # Prefer medium quality, fallback to default
-            return thumbnails.get('medium', {}).get('url') or thumbnails.get('default', {}).get('url', '')
-    except ssl.SSLError as e:
-        # Log SSL errors but don't crash - these are often transient network issues
-        print(f"SSL error fetching thumbnail for {video_id}: {e}")
-    except HttpError as e:
-        # Log HTTP errors from YouTube API
-        print(f"YouTube API error fetching thumbnail for {video_id}: {e}")
-    except Exception as e:
-        # Log other errors
-        print(f"Error fetching thumbnail for {video_id}: {e}")
-    
-    return None
+    if not video_id:
+        return None
+    # hqdefault is reliable and matches the quality we used to prefer from the API
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 def parse_date_range(date_range: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """
