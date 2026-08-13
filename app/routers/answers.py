@@ -53,64 +53,74 @@ class QueueInfo(BaseModel):
     similarQuestions: Optional[List[SimilarQuestionForUpvote]] = None  # Similar questions for upvoting
     canPostNewQuestion: bool = True  # Whether user can post their own question
 
+def _question_votes(doc: Optional[dict]) -> int:
+    if not doc:
+        return 0
+    return doc.get("voteUp", doc.get("votes", doc.get("upvotes", 0))) or 0
+
+
+def _build_light_queue_info(question: str) -> QueueInfo:
+    """Cheap queue status only — no similar-question search."""
+    question_in_db = find_question_by_text(question)
+    return QueueInfo(
+        questionInQueue=question_in_db is not None,
+        upvotes=_question_votes(question_in_db),
+        similarQuestions=None,
+        canPostNewQuestion=True,
+    )
+
+
 def _build_queue_info(question: str) -> QueueInfo:
-    """Helper function to build QueueInfo for a question"""
-    # Get similar questions using topics search + LLM filtering (returns dicts with 'question' and 'upvotes')
+    """Full queue info including similar unanswered questions (called when user requests)."""
     similar_db_questions_data = find_similar_questions_for_upvote(question, num_questions=5)
     question_in_db = find_question_by_text(question)
     in_queue = question_in_db is not None
-    # Support both "votes" and "upvotes" for backward compatibility
-    upvotes = question_in_db.get("votes", question_in_db.get("upvotes", 0)) if question_in_db else 0
+    upvotes = _question_votes(question_in_db)
     similar_questions_for_upvote = []
-    
-    # Add similar questions from database (already have votes from Cosmos DB)
+    question_lower = question.strip().lower()
+
+    def _append_similar(text: str, vote_count: int, in_queue_flag: bool) -> None:
+        if not text or text.strip().lower() == question_lower:
+            return
+        if any(sq.question.strip().lower() == text.strip().lower() for sq in similar_questions_for_upvote):
+            return
+        similar_questions_for_upvote.append(SimilarQuestionForUpvote(
+            question=text,
+            upvotes=vote_count,
+            inQueue=in_queue_flag,
+        ))
+
     for q_data in similar_db_questions_data:
         if isinstance(q_data, dict):
-            # New format: dict with 'question' and 'upvotes'
             db_question = q_data.get('question', '')
             db_upvotes = q_data.get('upvotes', 0)
-            # Check if question exists in DB to determine inQueue status
             db_question_in_db = find_question_by_text(db_question)
-            similar_questions_for_upvote.append(SimilarQuestionForUpvote(
-                question=db_question, 
-                upvotes=db_upvotes, 
-                inQueue=db_question_in_db is not None
-            ))
+            _append_similar(db_question, db_upvotes, db_question_in_db is not None)
         else:
-            # Legacy format: just question text (backward compatibility)
             db_question = q_data if isinstance(q_data, str) else q_data.get('question', '')
             db_question_in_db = find_question_by_text(db_question)
-            db_upvotes = db_question_in_db.get("voteUp", db_question_in_db.get("votes", db_question_in_db.get("upvotes", 0))) if db_question_in_db else 0
-            similar_questions_for_upvote.append(SimilarQuestionForUpvote(
-                question=db_question, 
-                upvotes=db_upvotes, 
-                inQueue=db_question_in_db is not None
-            ))
-    
-    # Also add similar questions from queue
+            _append_similar(db_question, _question_votes(db_question_in_db), db_question_in_db is not None)
+
     try:
         similar_queue_questions = find_similar_questions_in_queue(question, limit=5)
         for queue_item in similar_queue_questions:
             queue_question = queue_item.get("question", "")
-            queue_question_lower = queue_question.strip().lower()
-            question_lower = question.strip().lower()
-            # Skip if it's the same question or already in list
-            if queue_question_lower != question_lower and not any(sq.question.strip().lower() == queue_question_lower for sq in similar_questions_for_upvote):
-                similar_questions_for_upvote.append(SimilarQuestionForUpvote(
-                    question=queue_question, 
-                    upvotes=queue_item.get("voteUp", queue_item.get("votes", queue_item.get("upvotes", 0))), 
-                    inQueue=True
-                ))
+            _append_similar(
+                queue_question,
+                queue_item.get("voteUp", queue_item.get("votes", queue_item.get("upvotes", 0))) or 0,
+                True,
+            )
     except Exception as e:
         print(f"Error finding similar questions in queue: {e}")
-    
-    # Sort by upvotes (highest first) and limit to top 5
-    similar_questions_for_upvote = sorted(similar_questions_for_upvote, key=lambda x: x.upvotes, reverse=True)[:5]
+
+    similar_questions_for_upvote = sorted(
+        similar_questions_for_upvote, key=lambda x: x.upvotes, reverse=True
+    )[:5]
     return QueueInfo(
-        questionInQueue=in_queue, 
-        upvotes=upvotes, 
-        similarQuestions=similar_questions_for_upvote if similar_questions_for_upvote else None, 
-        canPostNewQuestion=True
+        questionInQueue=in_queue,
+        upvotes=upvotes,
+        similarQuestions=similar_questions_for_upvote if similar_questions_for_upvote else None,
+        canPostNewQuestion=True,
     )
 
 class AnswersResponseV1(BaseModel):
@@ -303,86 +313,10 @@ async def get_answers_v1(
             
             return response
         
-        # Step 2: No Q&A matches — clear empty state + queue/upvote options.
-        # Tag suggestions via load_tagged_chapters were broken/unused; skip them.
-        suggested_tags = None
-        
-        # Find similar questions from the database for upvoting (using topics search + LLM)
-        # Returns list of dicts with 'question' and 'upvotes'
-        similar_db_questions_data = find_similar_questions_for_upvote(question, num_questions=5)
-        
-        # Check if question is in queue and get upvotes from Cosmos DB
-        question_in_db = find_question_by_text(question)
-        in_queue = question_in_db is not None
-        # Support both old and new schema
-        upvotes = question_in_db.get("voteUp", question_in_db.get("votes", question_in_db.get("upvotes", 0))) if question_in_db else 0
-        
-        # Build list of similar questions for upvoting (from database + Cosmos DB queue)
-        similar_questions_for_upvote = []
-        
-        # Add similar questions from Q&A database (already have votes from Cosmos DB)
-        for q_data in similar_db_questions_data:
-            if isinstance(q_data, dict):
-                # New format: dict with 'question' and 'upvotes'
-                db_question = q_data.get('question', '')
-                db_upvotes = q_data.get('upvotes', 0)
-                db_question_in_db = find_question_by_text(db_question)
-                similar_questions_for_upvote.append(
-                    SimilarQuestionForUpvote(
-                        question=db_question,
-                        upvotes=db_upvotes,
-                        inQueue=db_question_in_db is not None
-                    )
-                )
-            else:
-                # Legacy format: just question text (backward compatibility)
-                db_question = q_data if isinstance(q_data, str) else q_data.get('question', '')
-                db_question_in_db = find_question_by_text(db_question)
-                db_upvotes = db_question_in_db.get("voteUp", db_question_in_db.get("votes", db_question_in_db.get("upvotes", 0))) if db_question_in_db else 0
-                similar_questions_for_upvote.append(
-                    SimilarQuestionForUpvote(
-                        question=db_question,
-                        upvotes=db_upvotes,
-                        inQueue=db_question_in_db is not None
-                    )
-                )
-        
-        # Add similar questions from Cosmos DB queue
-        try:
-            similar_queue_questions = find_similar_questions_in_queue(question, limit=5)
-            for queue_item in similar_queue_questions:
-                queue_question = queue_item.get("question", "")
-                queue_question_lower = queue_question.strip().lower()
-                question_lower = question.strip().lower()
-                
-                # Skip if it's the same question or already in list
-                if queue_question_lower != question_lower and \
-                   not any(sq.question.strip().lower() == queue_question_lower for sq in similar_questions_for_upvote):
-                    similar_questions_for_upvote.append(
-                        SimilarQuestionForUpvote(
-                            question=queue_question,
-                            upvotes=queue_item.get("voteUp", queue_item.get("votes", queue_item.get("upvotes", 0))),
-                            inQueue=True
-                        )
-                    )
-        except Exception as e:
-            print(f"Error finding similar questions in queue: {e}")
-            # Continue without queue questions if Cosmos DB is unavailable
-        
-        # Limit to top 5 similar questions, sorted by upvotes
-        similar_questions_for_upvote = sorted(
-            similar_questions_for_upvote, 
-            key=lambda x: x.upvotes, 
-            reverse=True
-        )[:5]
-        
-        queue_info = QueueInfo(
-            questionInQueue=in_queue,
-            upvotes=upvotes,
-            similarQuestions=similar_questions_for_upvote if similar_questions_for_upvote else None,
-            canPostNewQuestion=True
-        )
-        
+        # Step 2: No Q&A matches — cheap empty state. Similar-question search
+        # runs later via GET /answers/v1/queue-info when the user requests.
+        queue_info = _build_light_queue_info(question)
+
         return {
             "answers": [],
             "relatedQuestion": None,
@@ -390,9 +324,9 @@ async def get_answers_v1(
             "youtubeSearchResults": None,
             "searchStatus": "no_results",
             "searchStage": "complete",
-            "suggestedTags": suggested_tags,
+            "suggestedTags": None,
             "queueInfo": queue_info,
-            "userMessage": "No related Q&A found for this question. You can upvote a similar unanswered question below, or add yours to the queue."
+            "userMessage": None
         }
     
     except ValueError as e:

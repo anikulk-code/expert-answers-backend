@@ -409,11 +409,8 @@ Return ONLY the question text, nothing else."""
 
 def find_similar_questions_for_upvote(user_query: str, num_questions: int = 3) -> List[Dict]:
     """
-    Find similar questions from Cosmos DB using topics search + LLM filtering.
-    Returns questions with their text and vote counts.
-    
-    Uses the same logic as main search: topics search first, then LLM filtering.
-    
+    Find similar unanswered questions via vector search (no topic parse, no LLM).
+
     Args:
         user_query: User's question
         num_questions: Number of similar questions to return
@@ -421,76 +418,27 @@ def find_similar_questions_for_upvote(user_query: str, num_questions: int = 3) -
     Returns:
         List of dicts with 'question' (str) and 'upvotes' (int)
     """
-    # Step 1: Get candidates from Cosmos DB using topics search
-    # For related questions (upvoting), we want questions WITHOUT video_link (unanswered questions)
-    from app.services.search_service import topic_entity_search
-    
-    # Get top candidates from topics search - only unanswered questions (no video_link)
-    candidates = topic_entity_search(user_query, top_n=30, require_video_link=False)  # Get more candidates than we need
-    
-    if not candidates:
-        return []
-    
-    # Format questions for LLM context
-    questions_text = "\n".join([
-        f"{i+1}. {q.get('questionText', q.get('question', ''))}"
-        for i, q in enumerate(candidates)
-    ])
-    
-    prompt = f"""A user asked this question: "{user_query}"
+    from app.services.search_service import vector_search
 
-We want to show them similar questions from our database that they might want to upvote.
-
-Here are candidate questions from Q&A videos (pre-filtered by topic matching, {len(candidates)} total):
-
-{questions_text}
-
-Find {num_questions} question numbers (1-based index) from the list above that are most similar or related to the user's question.
-These should be questions that explore similar topics, concepts, or themes, even if they don't directly answer it.
-
-Return ONLY a valid JSON array with the question numbers, ordered by similarity.
-Example: [5, 12, 23]
-
-Return only the JSON array, no other text:"""
-    
     try:
-        openai_client = get_openai_client()
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that finds similar questions. Always return valid JSON arrays."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0,
-            max_tokens=50
+        candidates = vector_search(
+            user_query,
+            top_n=num_questions,
+            require_video_link=False,
         )
-        
-        result_text = response.choices[0].message.content.strip()
-        if result_text.startswith("```"):
-            result_text = result_text.split("```")[1]
-            if result_text.startswith("json"):
-                result_text = result_text[4:]
-        result_text = result_text.strip()
-        
-        indices = json.loads(result_text)
-        
-        # Get similar questions with votes from Cosmos DB
         similar_questions = []
-        for idx in indices[:num_questions]:
-            if 1 <= idx <= len(candidates):
-                question_data = candidates[idx - 1]
-                question_text = question_data.get('questionText', question_data.get('question', ''))
-                if question_text:
-                    # Get vote count from Cosmos DB document
-                    upvotes = question_data.get('voteUp', question_data.get('votes', question_data.get('upvotes', 0)))
-                    similar_questions.append({
-                        'question': question_text,
-                        'upvotes': upvotes
-                    })
-        
+        for question_data in candidates:
+            question_text = question_data.get('questionText', question_data.get('question', ''))
+            if not question_text:
+                continue
+            similar_questions.append({
+                'question': question_text,
+                'upvotes': question_data.get(
+                    'voteUp',
+                    question_data.get('votes', question_data.get('upvotes', 0)),
+                ) or 0,
+            })
         return similar_questions
-    
     except Exception as e:
         print(f"Error finding similar questions: {e}")
         return []
