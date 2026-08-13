@@ -7,7 +7,7 @@ Service for processing questions and extracting computed values:
 
 import json
 from typing import List, Dict, Optional
-from app.services.llm_service import OPENAI_CHAT_MODEL, get_openai_client
+from app.services.llm_service import create_chat_completion
 
 
 def compute_canonical_text(question: str) -> str:
@@ -26,8 +26,6 @@ def compute_canonical_text(question: str) -> str:
         Canonical text (minimal, essential keywords)
     """
     try:
-        openai_client = get_openai_client()
-        
         prompt = f"""Extract the canonical (minimal) form of this question by removing all filler words and keeping only the essential core concepts.
 
 Question: "{question}"
@@ -42,14 +40,12 @@ Examples:
 
 Canonical text:"""
 
-        response = openai_client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
+        response = create_chat_completion(
             messages=[
                 {"role": "system", "content": "You extract canonical forms of questions. Return only the canonical text, no quotes or explanations."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
-            max_tokens=30
+            max_tokens=30,
         )
         
         canonical = response.choices[0].message.content.strip()
@@ -77,8 +73,6 @@ def extract_topics_and_entities(question: str) -> Dict[str, any]:
         Dictionary with "topics" (list of strings) and "entities" (list of dicts with "type" and "name")
     """
     try:
-        openai_client = get_openai_client()
-        
         prompt = f"""Extract topics and entities from this question.
 
 Question: "{question}"
@@ -126,14 +120,12 @@ Question: "Why should I care about spirituality?"
 
 Return ONLY the JSON object, no other text:"""
 
-        response = openai_client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
+        response = create_chat_completion(
             messages=[
                 {"role": "system", "content": "You extract topics and entities from questions. Always return valid JSON objects with 'topics' (array of strings) and 'entities' (array of objects with 'type' and 'name'). Never include 'Vedanta' or 'Spirituality' as topics, as these are too common and not useful for filtering."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
-            max_tokens=200
+            max_tokens=200,
         )
         
         result_text = response.choices[0].message.content.strip()

@@ -6,9 +6,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Non-reasoning chat model: better than gpt-4o, similar or lower latency.
-# Override with OPENAI_CHAT_MODEL if needed. Do not use GPT-5 here (reasoning = slower).
-OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1")
+# GPT-5.6 Terra balances quality vs cost. Default reasoning_effort=none so it
+# does not think at medium (the API default) on the search hot path.
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5.6-terra")
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "none")
 
 # Initialize OpenAI client
 client = None
@@ -22,6 +23,25 @@ def get_openai_client():
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         client = OpenAI(api_key=api_key)
     return client
+
+
+def create_chat_completion(messages, max_tokens: int = 150):
+    """Chat completion using OPENAI_CHAT_MODEL.
+
+    GPT-5.6 defaults to medium reasoning (slower). We pin effort to none unless
+    OPENAI_REASONING_EFFORT is set. Temperature is omitted for GPT-5.x.
+    """
+    openai_client = get_openai_client()
+    kwargs = {
+        "model": OPENAI_CHAT_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+    if OPENAI_CHAT_MODEL.startswith("gpt-5"):
+        kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
+    else:
+        kwargs["temperature"] = 0
+    return openai_client.chat.completions.create(**kwargs)
 
 # Cache for questions data
 _questions_cache = None
@@ -170,17 +190,12 @@ Return up to {top_n} 1-based question numbers, best match first.
 Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
 
     try:
-        openai_client = get_openai_client()
-        
-        # Strict judge; gpt-4.1 (override via OPENAI_CHAT_MODEL)
-        response = openai_client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
+        response = create_chat_completion(
             messages=[
                 {"role": "system", "content": "You are a strict question matcher. Prefer returning [] over weak thematic matches. Only select candidates that directly answer the user's question. Always return a valid JSON array of 1-based indices."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,  # Set to 0 for deterministic/idempotent results
-            max_tokens=150
+            max_tokens=150,
         )
         
         # Parse response
@@ -496,15 +511,12 @@ Be VERY STRICT. Only mark as relevant (true) if the video actually discusses the
 
 Return ONLY the JSON object, no other text:"""
 
-        # Using GPT-4o for better semantic understanding of video relevance
-        response = openai_client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
+        response = create_chat_completion(
             messages=[
                 {"role": "system", "content": "You are a strict relevance checker. Only mark videos as relevant if they DIRECTLY address the specific topic in the user's question. When in doubt, mark as NOT relevant. Always return valid JSON objects with 'relevant' (boolean) and 'confidence' (number 0-10)."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
-            max_tokens=100
+            max_tokens=100,
         )
         
         result_text = response.choices[0].message.content.strip()
