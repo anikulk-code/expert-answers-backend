@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Non-reasoning chat model: better than gpt-4o, similar or lower latency.
+# Override with OPENAI_CHAT_MODEL if needed. Do not use GPT-5 here (reasoning = slower).
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1")
+
 # Initialize OpenAI client
 client = None
 
@@ -168,10 +172,9 @@ Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
     try:
         openai_client = get_openai_client()
         
-        # LLM filtering: Filter candidates for relevance (temperature=0 for deterministic results)
-        # Using GPT-4o for better semantic understanding of question matching
+        # Strict judge; gpt-4.1 (override via OPENAI_CHAT_MODEL)
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=OPENAI_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "You are a strict question matcher. Prefer returning [] over weak thematic matches. Only select candidates that directly answer the user's question. Always return a valid JSON array of 1-based indices."},
                 {"role": "user", "content": prompt}
@@ -495,7 +498,7 @@ Return ONLY the JSON object, no other text:"""
 
         # Using GPT-4o for better semantic understanding of video relevance
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=OPENAI_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "You are a strict relevance checker. Only mark videos as relevant if they DIRECTLY address the specific topic in the user's question. When in doubt, mark as NOT relevant. Always return valid JSON objects with 'relevant' (boolean) and 'confidence' (number 0-10)."},
                 {"role": "user", "content": prompt}

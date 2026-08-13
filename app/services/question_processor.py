@@ -7,7 +7,7 @@ Service for processing questions and extracting computed values:
 
 import json
 from typing import List, Dict, Optional
-from app.services.llm_service import get_openai_client
+from app.services.llm_service import OPENAI_CHAT_MODEL, get_openai_client
 
 
 def compute_canonical_text(question: str) -> str:
@@ -43,7 +43,7 @@ Examples:
 Canonical text:"""
 
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=OPENAI_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "You extract canonical forms of questions. Return only the canonical text, no quotes or explanations."},
                 {"role": "user", "content": prompt}
@@ -127,7 +127,7 @@ Question: "Why should I care about spirituality?"
 Return ONLY the JSON object, no other text:"""
 
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=OPENAI_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": "You extract topics and entities from questions. Always return valid JSON objects with 'topics' (array of strings) and 'entities' (array of objects with 'type' and 'name'). Never include 'Vedanta' or 'Spirituality' as topics, as these are too common and not useful for filtering."},
                 {"role": "user", "content": prompt}
