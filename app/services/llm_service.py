@@ -1,7 +1,6 @@
 import os
 import json
 from typing import List, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -102,10 +101,10 @@ def get_playlist_id(video_id: str) -> Optional[str]:
 
 def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
     """
-    Match user query to questions using vector + topics search + LLM filtering.
-    
-    First uses both vector search (semantic similarity) and topics search from Cosmos DB
-    to get candidates, combines and deduplicates them, then applies LLM to filter for relevance.
+    Match user query to answered Q&A questions via vector search + a strict LLM judge.
+
+    Topic extraction is intentionally not used on this hot path (too slow / redundant
+    with embeddings). Topics remain useful for ingestion and queue similarity elsewhere.
     
     Args:
         user_query: User's question
@@ -122,85 +121,12 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
         if cache_key in _match_cache:
             return _match_cache[cache_key]
     
-    # Step 1: Get candidates from both vector search AND topics search (in parallel)
-    from app.services.search_service import vector_search, topic_entity_search
-    
-    # Run vector and topic searches in parallel for better performance
-    # Only get questions WITH video_link (answered questions) for main search
-    print(f"   🔄 Running vector and topic searches in parallel...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        vector_future = executor.submit(vector_search, user_query, 50, True)
-        topic_future = executor.submit(topic_entity_search, user_query, 50, True)
-        
-        # Wait for both to complete
-        vector_candidates = vector_future.result()
-        topic_candidates = topic_future.result()
-    
-    print(f"   📊 Vector search: {len(vector_candidates)} candidates")
-    print(f"   📊 Topics search: {len(topic_candidates)} candidates")
-    
-    # Find max topic score for normalization
-    max_topic_score = 0.0
-    for candidate in topic_candidates:
-        topic_score = candidate.get("topic_entity_score", 0.0) or 0.0
-        if topic_score > max_topic_score:
-            max_topic_score = topic_score
-    if max_topic_score == 0.0:
-        max_topic_score = 4.0
-    else:
-        max_topic_score = max(max_topic_score * 1.2, 4.0)
-    
-    # Combine and deduplicate candidates by question ID, with normalized scoring
-    candidates_dict = {}
-    
-    # Add vector search results first (vector scores already 0-1)
-    for candidate in vector_candidates:
-        candidate_id = candidate.get('id')
-        if candidate_id:
-            vector_score = candidate.get("vector_score", 0.0) or 0.0
-            candidates_dict[candidate_id] = {
-                **candidate,
-                "_normalized_vector": vector_score,
-                "_normalized_topic": 0.0
-            }
-    
-    # Add topic search results (normalize topic scores)
-    for candidate in topic_candidates:
-        candidate_id = candidate.get('id')
-        if candidate_id:
-            topic_score = candidate.get("topic_entity_score", 0.0) or 0.0
-            normalized_topic = topic_score / max_topic_score if max_topic_score > 0 else 0.0
-            normalized_topic = min(normalized_topic, 1.0)
-            
-            if candidate_id in candidates_dict:
-                # Merge: add topic score to existing
-                candidates_dict[candidate_id]['topic_entity_score'] = topic_score
-                candidates_dict[candidate_id]['_normalized_topic'] = normalized_topic
-                # Combined normalized score with bonus for appearing in both
-                normalized_vector = candidates_dict[candidate_id].get("_normalized_vector", 0.0)
-                combined_normalized = max(normalized_vector, normalized_topic) * 1.1
-                candidates_dict[candidate_id]['_combined_normalized'] = min(combined_normalized, 1.0)
-            else:
-                # New item from topics search only
-                candidates_dict[candidate_id] = {
-                    **candidate,
-                    "_normalized_vector": 0.0,
-                    "_normalized_topic": normalized_topic,
-                    "_combined_normalized": normalized_topic
-                }
-    
-    # Sort by combined normalized score and take top 20
-    candidates = list(candidates_dict.values())
-    candidates.sort(key=lambda x: x.get("_combined_normalized", 0.0), reverse=True)
-    candidates = candidates[:20]  # Limit to top 20 before sending to LLM
-    
-    # Remove internal scoring fields before sending to LLM
-    for candidate in candidates:
-        candidate.pop("_normalized_vector", None)
-        candidate.pop("_normalized_topic", None)
-        candidate.pop("_combined_normalized", None)
-    
-    print(f"   📊 Combined unique candidates: {len(candidates_dict)} total, {len(candidates)} top candidates (normalized) sent to LLM")
+    # Step 1: Vector retrieval only (answered questions with video_link)
+    from app.services.search_service import vector_search
+
+    print(f"   🔄 Running vector search for candidates...")
+    candidates = vector_search(user_query, top_n=20, require_video_link=True)
+    print(f"   📊 Vector search: {len(candidates)} candidates sent to LLM")
     
     if not candidates:
         return []
@@ -217,31 +143,27 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
     for i, q in enumerate(candidates[:3]):
         print(f"      {i+1}. {q.get('questionText', q.get('question', ''))[:60]}...")
     
-    # Step 2: LLM filtering - filter candidates for relevance
-    prompt = f"""You are helping match user questions to existing Q&A video segments.
+    # Step 2: Strict LLM judge — only keep candidates that actually answer the question
+    prompt = f"""You match a user's question to existing answered Q&A video questions.
 
 User's question: "{user_query}"
 
-Here are candidate questions from Q&A videos (pre-filtered by vector search + topics search, {len(candidates)} total):
+Candidate questions from vector search ({len(candidates)} total):
 
 {questions_text}
 
-Find question numbers that are relevant to the user's question. Return an EMPTY array [] only if:
-- The user's question is gibberish, nonsense, or meaningless
-- The user's question is completely unrelated to spirituality/Vedanta
-- None of the questions are even somewhat related to what the user is asking
+Include a candidate ONLY if a viewer watching that Q&A segment would get a direct answer
+to the user's question (same core claim, intent, or specific teaching asked about).
 
-You should include questions that:
-- Directly answer the user's question (highest priority)
-- Address the same core topic or concept, even if from a different angle
-- Explore related aspects of the same topic
-- Are semantically similar or cover overlapping themes
+Do NOT include candidates that merely:
+- share a broad theme (e.g. both about "consciousness" or "suffering")
+- are loosely related or "interesting next"
+- ask a different question on a nearby topic
 
-Return up to {top_n} question numbers that are relevant to the user's question, ordered by relevance (most relevant first).
-Return ONLY a valid JSON array with the question numbers (1-based index), ordered by relevance, or [] if nothing is relevant.
-Example: [5, 23, 101] or []
+Return [] if none of the candidates would directly answer the user.
 
-Return only the JSON array, no other text:"""
+Return up to {top_n} 1-based question numbers, best match first.
+Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
 
     try:
         openai_client = get_openai_client()
@@ -251,7 +173,7 @@ Return only the JSON array, no other text:"""
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a question matcher that finds relevant questions. Include questions that directly answer the query, address the same topic, or explore related concepts. Return [] (empty array) only if the question is gibberish, completely unrelated, or if no questions are relevant. Always return valid JSON arrays."},
+                {"role": "system", "content": "You are a strict question matcher. Prefer returning [] over weak thematic matches. Only select candidates that directly answer the user's question. Always return a valid JSON array of 1-based indices."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0,  # Set to 0 for deterministic/idempotent results
