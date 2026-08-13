@@ -36,6 +36,7 @@ htmlcov/
 # Evaluation
 eval/results/
 eval/scores.json
+eval/backups/
 
 # Embeddings (generated locally, not committed)
 askswami_questions_embeddings.json
@@ -46,4 +47,3 @@ askswami_questions_expansions.json
 # Distilled questions and embeddings (generated locally)
 askswami_questions_distilled.json
 askswami_questions_distilled_embeddings.json
-

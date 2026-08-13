@@ -61,7 +61,13 @@ def _question_votes(doc: Optional[dict]) -> int:
 
 def _build_light_queue_info(question: str) -> QueueInfo:
     """Cheap queue status only — no similar-question search."""
-    question_in_db = find_question_by_text(question)
+    try:
+        question_in_db = find_question_by_text(question)
+    except Exception as exc:
+        # Search results should not fail just because the optional queue store is
+        # temporarily inaccessible (for example, a Cosmos firewall restriction).
+        print(f"Queue status lookup unavailable: {exc}")
+        question_in_db = None
     return QueueInfo(
         questionInQueue=question_in_db is not None,
         upvotes=_question_votes(question_in_db),
@@ -128,11 +134,12 @@ class AnswersResponseV1(BaseModel):
     relatedQuestion: Optional[str] = None
     relatedQuestions: Optional[List[str]] = None  # For fallback when no answers found
     youtubeSearchResults: Optional[List[AnswerResponse]] = None  # For YouTube search fallback
-    searchStatus: Optional[str] = None  # "qa_match", "youtube_fallback", "tags_fallback", "no_results"
+    searchStatus: Optional[str] = None  # "answered", "related_only", "unanswered" (plus legacy values)
     searchStage: Optional[str] = None  # "searching_questions", "searching_videos", "checking_relevance", "complete"
     suggestedTags: Optional[List[TagSuggestion]] = None  # For tags fallback
     queueInfo: Optional[QueueInfo] = None  # For queue/upvote info
     userMessage: Optional[str] = None  # User-facing message explaining the result
+    searchTimings: Optional[Dict[str, float]] = None
 
 @router.get("/answers", response_model=List[AnswerResponse])
 async def get_answers(
@@ -244,7 +251,15 @@ async def get_answers_v1(
         # Step 1: Match question using LLM (gets more candidates, filters to top N)
         # Note: In a real async implementation, we could stream progress updates
         # For now, we'll set searchStage at key points
-        matches = match_question_with_llm(question, top_n=count)
+        classified_matches = match_question_with_llm(question, top_n=count)
+        matches = classified_matches.get("answers", [])
+        related_matches = classified_matches.get("related", [])
+        related_questions = [
+            match.get("question_text") or match.get("question", "")
+            for match in related_matches
+            if match.get("question_text") or match.get("question")
+        ]
+        search_timings = classified_matches.get("timings")
         
         if matches:
             # Format response to match AnswerResponse model
@@ -296,13 +311,14 @@ async def get_answers_v1(
             response = {
                 "answers": results,
                 "relatedQuestion": related_question,
-                "relatedQuestions": None,
+                "relatedQuestions": related_questions or None,
                 "youtubeSearchResults": None,
-                "searchStatus": "qa_match",
+                "searchStatus": "answered",
                 "searchStage": "complete",
                 "suggestedTags": None,
                 "queueInfo": None,
-                "userMessage": None
+                "userMessage": None,
+                "searchTimings": search_timings,
             }
             
             # Cache full response for precanned questions (including thumbnails)
@@ -313,20 +329,21 @@ async def get_answers_v1(
             
             return response
         
-        # Step 2: No Q&A matches — cheap empty state. Similar-question search
-        # runs later via GET /answers/v1/queue-info when the user requests.
+        # Step 2: No direct answer. Preserve related answered questions from the
+        # same judge call; queue/upvote similarity still runs only on request.
         queue_info = _build_light_queue_info(question)
 
         return {
             "answers": [],
             "relatedQuestion": None,
-            "relatedQuestions": None,
+            "relatedQuestions": related_questions or None,
             "youtubeSearchResults": None,
-            "searchStatus": "no_results",
+            "searchStatus": "related_only" if related_questions else "unanswered",
             "searchStage": "complete",
             "suggestedTags": None,
             "queueInfo": queue_info,
-            "userMessage": None
+            "userMessage": None,
+            "searchTimings": search_timings,
         }
     
     except ValueError as e:
@@ -507,7 +524,8 @@ async def llm_filtered_search(
         
         print(f"🔍 LLM-filtered search called with query: '{query}', top_n: {top_n}")
         # Use the same LLM matching function as the homepage
-        llm_results = match_question_with_llm(query, top_n=top_n)
+        classification = match_question_with_llm(query, top_n=top_n)
+        llm_results = classification.get("answers", [])
         print(f"🔍 LLM-filtered search returned {len(llm_results)} results")
         
         if llm_results:

@@ -18,7 +18,7 @@ Each query in `golden_set.json` has:
   - `question`: Expected question text (exact or partial match)
   - `url_pattern`: Pattern to match in URL (e.g., "youtube.com")
   - `min_rank`: Minimum expected rank (1 = first result)
-  - `required`: Whether this answer must be present
+- `expected_related`: List of relevant questions that should appear under Related rather than Answers
 - `min_relevant_count`: Minimum number of relevant results expected
 - `max_results_to_check`: How many results to evaluate
 
@@ -26,8 +26,8 @@ Each query in `golden_set.json` has:
 
 1. Run your API with each query
 2. Identify which results are actually relevant
-3. Add those to `expected_answers` in the golden set
-4. Mark `required: true` for must-have answers, `false` for nice-to-have
+3. Add direct answers to `expected_answers`
+4. Add relevant-but-not-answering questions to `expected_related`
 
 ## Next Steps
 
@@ -36,4 +36,3 @@ After creating the golden set, we'll create an evaluation script that:
 2. Compares results with expected answers
 3. Calculates precision, recall, and ranking metrics
 4. Generates a report
-

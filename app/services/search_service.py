@@ -6,9 +6,75 @@ Provides three search methods:
 3. Topic/Entity search - uses extracted topics and entities
 """
 
+import json
+import math
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import List, Dict, Optional
 from app.services.cosmos_service import get_cosmos_container
 from app.services.question_processor import process_question
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_LOCAL_DATA_DIR = Path(__file__).resolve().parents[2]
+
+
+def _tokens(text: str) -> set[str]:
+    aliases = {"ramakrishana": "ramakrishna"}
+    return {aliases.get(token, token) for token in _TOKEN_RE.findall((text or "").lower())}
+
+
+@lru_cache(maxsize=1)
+def _local_search_documents() -> List[Dict]:
+    """Load the checked-in 519-question corpus for a dependency-free fallback."""
+    questions_path = _LOCAL_DATA_DIR / "askswami_questions.json"
+    expansions_path = _LOCAL_DATA_DIR / "askswami_questions_expansions.json"
+    with questions_path.open(encoding="utf-8") as source:
+        questions = json.load(source)
+    with expansions_path.open(encoding="utf-8") as source:
+        expansions = json.load(source).get("questions", [])
+
+    expansion_by_question = {item["question"]: item for item in expansions}
+    documents = []
+    for item in questions:
+        expansion = expansion_by_question.get(item.get("question", ""), {})
+        search_text = " ".join([
+            item.get("question", ""),
+            expansion.get("core_terms", ""),
+            " ".join(expansion.get("synonyms", [])),
+        ])
+        documents.append({
+            "questionText": item.get("question", ""),
+            "video_link": item.get("url", ""),
+            "search_tokens": _tokens(search_text),
+        })
+    return documents
+
+
+def local_expansion_search(query: str, top_n: int = 20) -> List[Dict]:
+    """Rank the local corpus using curated expansion terms when Cosmos is unavailable."""
+    query_tokens = _tokens(query)
+    if not query_tokens:
+        return []
+    documents = _local_search_documents()
+    frequencies = {
+        token: sum(token in document["search_tokens"] for document in documents)
+        for token in query_tokens
+    }
+    scored = []
+    for document in documents:
+        overlap = query_tokens & document["search_tokens"]
+        if not overlap:
+            continue
+        score = sum(math.log((len(documents) + 1) / (frequencies[token] + 1)) + 1 for token in overlap)
+        score += 2.0 * len(query_tokens & _tokens(document["questionText"]))
+        scored.append((score, document))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {key: value for key, value in document.items() if key != "search_tokens"}
+        for _, document in scored[:top_n]
+    ]
 
 
 # Removed get_all_questions_from_cosmos() - we now use Cosmos DB queries directly
@@ -63,14 +129,17 @@ def vector_search(query: str, top_n: int = 10, require_video_link: bool = True) 
     try:
         # Try using Cosmos DB native vector search
         from app.services.vector_search_service import vector_search_cosmos
-        return vector_search_cosmos(query, top_n, require_video_link=require_video_link)
+        results = vector_search_cosmos(query, top_n, require_video_link=require_video_link)
+        if results or not require_video_link:
+            return results
+        return local_expansion_search(query, top_n)
     except ImportError:
         # Fallback: return empty if vector search service not available
-        return []
+        return local_expansion_search(query, top_n) if require_video_link else []
     except Exception as e:
         # If VectorDistance() fails (feature not enabled), return empty
         print(f"Vector search error (may not be enabled yet): {e}")
-        return []
+        return local_expansion_search(query, top_n) if require_video_link else []
 
 
 def topic_entity_search(query: str, top_n: int = 50, require_video_link: bool = True) -> List[Dict]:

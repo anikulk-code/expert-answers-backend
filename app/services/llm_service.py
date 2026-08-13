@@ -1,6 +1,7 @@
 import os
 import json
-from typing import List, Dict, Optional
+import time
+from typing import Any, List, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -25,7 +26,7 @@ def get_openai_client():
     return client
 
 
-def create_chat_completion(messages, max_tokens: int = 150):
+def create_chat_completion(messages, max_tokens: int = 300, response_format=None):
     """Chat completion using OPENAI_CHAT_MODEL.
 
     GPT-5.6 defaults to medium reasoning (slower). We pin effort to none unless
@@ -35,12 +36,15 @@ def create_chat_completion(messages, max_tokens: int = 150):
     kwargs = {
         "model": OPENAI_CHAT_MODEL,
         "messages": messages,
-        "max_tokens": max_tokens,
     }
     if OPENAI_CHAT_MODEL.startswith("gpt-5"):
         kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
+        kwargs["max_completion_tokens"] = max_tokens
     else:
         kwargs["temperature"] = 0
+        kwargs["max_tokens"] = max_tokens
+    if response_format:
+        kwargs["response_format"] = response_format
     return openai_client.chat.completions.create(**kwargs)
 
 # Cache for questions data
@@ -123,7 +127,7 @@ def get_playlist_id(video_id: str) -> Optional[str]:
     lookup = get_playlist_id_lookup()
     return lookup.get(video_id)
 
-def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
+def match_question_with_llm(user_query: str, top_n: int = 3) -> Dict[str, Any]:
     """
     Match user query to answered Q&A questions via vector search + a strict LLM judge.
 
@@ -135,8 +139,9 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
         top_n: Maximum number of top matches to return
     
     Returns:
-        List of matched questions with video_link and timestamp
+        Dict containing direct ``answers`` and non-direct ``related`` candidates.
     """
+    started_at = time.perf_counter()
     # Check cache only for precanned questions (for idempotency)
     should_cache = is_precanned_question(user_query)
     cache_key = None
@@ -149,11 +154,17 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
     from app.services.search_service import vector_search
 
     print(f"   🔄 Running vector search for candidates...")
+    retrieval_started_at = time.perf_counter()
     candidates = vector_search(user_query, top_n=20, require_video_link=True)
+    retrieval_ms = (time.perf_counter() - retrieval_started_at) * 1000
     print(f"   📊 Vector search: {len(candidates)} candidates sent to LLM")
     
     if not candidates:
-        return []
+        return {
+            "answers": [],
+            "related": [],
+            "timings": {"retrieval_ms": round(retrieval_ms, 1), "judge_ms": 0.0, "total_ms": round((time.perf_counter() - started_at) * 1000, 1)},
+        }
     
     # Convert Cosmos DB structure to format expected by LLM (questionText -> question, video_link -> url)
     # Format questions for LLM context
@@ -167,8 +178,9 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> List[Dict]:
     for i, q in enumerate(candidates[:3]):
         print(f"      {i+1}. {q.get('questionText', q.get('question', ''))[:60]}...")
     
-    # Step 2: Strict LLM judge — only keep candidates that actually answer the question
-    prompt = f"""You match a user's question to existing answered Q&A video questions.
+    # Step 2: One LLM call classifies the same retrieved candidates into direct
+    # answers and related material. Queue/upvote similarity remains deferred.
+    prompt = f"""Classify existing answered Q&A video questions for a user's query.
 
 User's question: "{user_query}"
 
@@ -176,27 +188,37 @@ Candidate questions from vector search ({len(candidates)} total):
 
 {questions_text}
 
-Include a candidate ONLY if a viewer watching that Q&A segment would get a direct answer
-to the user's question (same core claim, intent, or specific teaching asked about).
+Put a candidate in answer_indices ONLY if a viewer watching that Q&A segment would get
+a direct answer to the user's question (same core claim, intent, scope, and specific teaching).
 
-Do NOT include candidates that merely:
-- share a broad theme (e.g. both about "consciousness" or "suffering")
-- are loosely related or "interesting next"
-- ask a different question on a nearby topic
+Treat broad synthesis requests such as "What did [teacher] say about [topic]?" or
+"What does [tradition] say about [topic]?" conservatively: a narrow sub-question about
+one aspect is related, not a direct answer. It is direct only when the candidate itself
+offers the requested overview or is a close paraphrase of the whole question. Likewise,
+evidence for an adjacent doctrine is related rather than proof of the user's exact claim.
 
-Return [] if none of the candidates would directly answer the user.
+Put a candidate in related_indices when it is genuinely useful nearby material but asks
+a different question or only addresses part of the user's intent. Shared vocabulary or a
+broad theme alone is not enough. Irrelevant candidates belong in neither list.
 
-Return up to {top_n} 1-based question numbers, best match first.
-Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
+The two arrays must be disjoint. Prefer an empty answer_indices array over presenting a
+weak thematic match as an answer.
+
+Return up to {top_n} answer indices and up to 5 related indices, best match first.
+Return ONLY this JSON object with 1-based indices:
+{{"answer_indices": [3, 1], "related_indices": [4, 8]}}"""
 
     try:
+        judge_started_at = time.perf_counter()
         response = create_chat_completion(
             messages=[
-                {"role": "system", "content": "You are a strict question matcher. Prefer returning [] over weak thematic matches. Only select candidates that directly answer the user's question. Always return a valid JSON array of 1-based indices."},
+                {"role": "system", "content": "You are a strict retrieval judge. Separate direct answers from genuinely related material and omit weak topical matches. Return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=150,
+            max_tokens=300,
+            response_format={"type": "json_object"},
         )
+        judge_ms = (time.perf_counter() - judge_started_at) * 1000
         
         # Parse response
         result_text = response.choices[0].message.content.strip()
@@ -207,89 +229,59 @@ Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
                 result_text = result_text[4:]
         result_text = result_text.strip()
         
-        indices = json.loads(result_text)
-        print(f"   🤖 LLM returned {len(indices)} indices: {indices}")
+        classification = json.loads(result_text)
+        if isinstance(classification, list):
+            # Backward-compatible parsing for an older cached/model response.
+            classification = {"answer_indices": classification, "related_indices": []}
+        answer_indices = classification.get("answer_indices", [])
+        related_indices = classification.get("related_indices", [])
+        if not isinstance(answer_indices, list) or not isinstance(related_indices, list):
+            raise ValueError("LLM classification arrays are invalid")
+        print(f"   🤖 LLM returned answers={answer_indices}, related={related_indices}")
         
         # Get candidate questions (deduplicate by URL to avoid same question appearing multiple times)
-        filtered_candidates = []
-        seen_urls = set()
-        skipped_no_url = 0
-        skipped_invalid_idx = 0
-        skipped_duplicate_url = 0
-        skipped_out_of_range = 0
-        
-        print(f"   🔍 Processing {len(indices)} indices from LLM: {indices}")
-        
-        for idx in indices[:top_n]:  # Limit to top_n
-            if not isinstance(idx, int):
+        def hydrate(indices, limit):
+            hydrated = []
+            seen_urls = set()
+            for raw_idx in indices[:limit]:
                 try:
-                    idx = int(idx)
-                except:
-                    print(f"   ⚠️  Invalid index type: {idx} (type: {type(idx)})")
-                    skipped_invalid_idx += 1
+                    idx = int(raw_idx)
+                except (TypeError, ValueError):
                     continue
-            
-            if not (1 <= idx <= len(candidates)):
-                print(f"   ⚠️  Index {idx} out of range (1-{len(candidates)})")
-                skipped_out_of_range += 1
-                continue
-                
-            question_data = candidates[idx - 1].copy()
-            question_text = question_data.get('questionText', question_data.get('question', ''))
-            
-            # Use video_link from Cosmos DB (convert to 'url' for compatibility)
-            question_url = question_data.get('video_link', '')
-            if not question_url:
-                skipped_no_url += 1
-                print(f"   ⚠️  Skipping candidate {idx} (no video_link): {question_text[:50]}...")
-                continue
-            
-            # Extract base URL (without timestamp) for deduplication
-            # NOTE: This means multiple questions from same video (different timestamps) will be deduplicated
-            base_url = question_url.split('&t=')[0] if '&t=' in question_url else question_url
-            if base_url in seen_urls:
-                skipped_duplicate_url += 1
-                print(f"   ⚠️  Skipping candidate {idx} (duplicate base URL): {question_text[:50]}... (URL: {base_url[:50]}...)")
-                continue
-            
-            seen_urls.add(base_url)
-            # Convert Cosmos DB structure to expected format
-            question_data['url'] = question_url  # Add 'url' field for compatibility
-            question_data['question_text'] = question_text
-            question_data['question'] = question_text  # Also add 'question' field
-            # Extract timestamp from video_link if present
-            if '&t=' in question_url:
-                timestamp_str = question_url.split('&t=')[1]
-                # Convert seconds to HH:MM:SS format
-                try:
-                    seconds = int(timestamp_str.replace('s', ''))
-                    hours = seconds // 3600
-                    minutes = (seconds % 3600) // 60
-                    secs = seconds % 60
-                    question_data['timestamp'] = f"{hours:02d}:{minutes:02d}:{secs:02d}"
-                except:
-                    question_data['timestamp'] = '00:00:00'
-            else:
+                if not 1 <= idx <= len(candidates):
+                    continue
+                question_data = candidates[idx - 1].copy()
+                question_text = question_data.get('questionText', question_data.get('question', ''))
+                question_url = question_data.get('video_link', '')
+                if not question_url or question_url in seen_urls:
+                    continue
+                seen_urls.add(question_url)
+                question_data['url'] = question_url
+                question_data['question_text'] = question_text
+                question_data['question'] = question_text
                 question_data['timestamp'] = '00:00:00'
-            question_data['match_rank'] = len(filtered_candidates) + 1
-            filtered_candidates.append(question_data)
-            print(f"   ✅ Added candidate {idx}: {question_text[:50]}... (URL: {base_url[:50]}...)")
-        
-        # Summary of what was skipped
-        if skipped_no_url > 0:
-            print(f"   ⚠️  Skipped {skipped_no_url} candidates due to missing video_link")
-        if skipped_invalid_idx > 0:
-            print(f"   ⚠️  Skipped {skipped_invalid_idx} candidates due to invalid index format")
-        if skipped_out_of_range > 0:
-            print(f"   ⚠️  Skipped {skipped_out_of_range} candidates due to out-of-range indices")
-        if skipped_duplicate_url > 0:
-            print(f"   ⚠️  Skipped {skipped_duplicate_url} candidates due to duplicate base URLs (same video, different timestamps)")
-        if len(indices) == 0:
-            print(f"   ⚠️  LLM returned empty array - no relevant questions found")
-        print(f"   ✅ LLM filtered to {len(filtered_candidates)} final candidates (from {len(indices)} LLM indices)")
-        
-        # Return filtered candidates directly (no second validation step)
-        final_matches = filtered_candidates
+                if '&t=' in question_url:
+                    try:
+                        seconds = int(question_url.split('&t=')[1].replace('s', ''))
+                        question_data['timestamp'] = f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+                    except (TypeError, ValueError):
+                        pass
+                question_data['match_rank'] = len(hydrated) + 1
+                hydrated.append(question_data)
+            return hydrated
+
+        direct_index_set = {int(idx) for idx in answer_indices if str(idx).isdigit()}
+        related_indices = [idx for idx in related_indices if str(idx).isdigit() and int(idx) not in direct_index_set]
+        final_matches = {
+            "answers": hydrate(answer_indices, top_n),
+            "related": hydrate(related_indices, 5),
+            "timings": {
+                "retrieval_ms": round(retrieval_ms, 1),
+                "judge_ms": round(judge_ms, 1),
+                "total_ms": round((time.perf_counter() - started_at) * 1000, 1),
+            },
+        }
+        print(f"   ✅ Classified {len(final_matches['answers'])} answers and {len(final_matches['related'])} related questions")
         
         # Cache the result only for precanned questions (for idempotency)
         if should_cache and cache_key:
@@ -302,7 +294,11 @@ Return ONLY a JSON array, e.g. [3, 1] or []. No other text."""
         print(f"❌ Error in LLM matching: {e}")
         print(f"   Traceback: {traceback.format_exc()}")
         # Fallback: return empty or use simple keyword matching
-        return []
+        return {
+            "answers": [],
+            "related": [],
+            "timings": {"retrieval_ms": round(locals().get("retrieval_ms", 0.0), 1), "judge_ms": 0.0, "total_ms": round((time.perf_counter() - started_at) * 1000, 1)},
+        }
 
 def find_related_questions(user_query: str, num_questions: int = 3) -> List[str]:
     """

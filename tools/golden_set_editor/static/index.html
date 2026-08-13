@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Golden Set Workshop</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Temporary evaluation tool</p>
+        <h1>Golden Set Workshop</h1>
+      </div>
+      <div class="save-area">
+        <span id="save-state" class="save-state">Loading…</span>
+        <button id="save-button" class="primary" disabled>Save golden set</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="summary" class="summary" aria-label="Dataset summary"></section>
+
+      <section class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-actions">
+            <input id="query-filter" type="search" placeholder="Filter test questions…" />
+            <div id="outcome-filters" class="filter-row"></div>
+            <button id="add-query" class="secondary full">+ Add test question</button>
+          </div>
+          <div id="query-list" class="query-list"></div>
+        </aside>
+
+        <section id="editor" class="editor empty">
+          <div class="empty-state">
+            <h2>Select a test question</h2>
+            <p>Classify what search should do, then select expected matches from the source corpus.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

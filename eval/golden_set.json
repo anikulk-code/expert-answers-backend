@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "2.0",
   "description": "Golden evaluation set for Expert Answers API",
   "queries": [
     {
@@ -12,16 +12,19 @@
           "url_pattern": "youtube.com",
           "min_rank": 1,
           "required": true
-        },
+        }
+      ],
+      "min_relevant_count": 1,
+      "max_results_to_check": 2,
+      "expected_outcome": "answered",
+      "expected_related": [
         {
           "question": "Is the result of Self Realization/Illumination \"spiritual retreat\"? What do you get out of the Realization?",
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": false
         }
-      ],
-      "min_relevant_count": 1,
-      "max_results_to_check": 2
+      ]
     },
     {
       "id": "q2",
@@ -39,28 +42,31 @@
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": true
-        }, 
+        },
         {
           "question": "Can consciousness truly be objectified and recognized directly?",
           "url_pattern": "youtube.com",
           "min_rank": 3,
           "required": true
-        },  
+        },
         {
           "question": "Is consciousness static, or is it a process?",
           "url_pattern": "youtube.com",
           "min_rank": 4,
           "required": true
-        },
-        {
-            "question": "What is the relationship between Maya and Chit (consciousness)?",
-            "url_pattern": "youtube.com",
-            "min_rank": 5,
-            "required": false
-        } 
+        }
       ],
       "min_relevant_count": 4,
-      "max_results_to_check": 5
+      "max_results_to_check": 5,
+      "expected_outcome": "answered",
+      "expected_related": [
+        {
+          "question": "What is the relationship between Maya and Chit (consciousness)?",
+          "url_pattern": "youtube.com",
+          "min_rank": 5,
+          "required": false
+        }
+      ]
     },
     {
       "id": "q3",
@@ -72,28 +78,31 @@
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": true
-        },  
+        },
         {
           "question": "My heart is troubled by the suffering around me. How can I hold on to Advaita?",
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": true
-        },
+        }
+      ],
+      "min_relevant_count": 2,
+      "max_results_to_check": 4,
+      "expected_outcome": "answered",
+      "expected_related": [
         {
           "question": "Does suffering bring us closer to spirituality?",
           "url_pattern": "youtube.com",
           "min_rank": 3,
           "required": false
-        },  
+        },
         {
           "question": "Why does the play of Consciousness give so many negative experiences?",
           "url_pattern": "youtube.com",
           "min_rank": 4,
           "required": false
         }
-      ],
-      "min_relevant_count": 3,
-      "max_results_to_check": 4
+      ]
     },
     {
       "id": "q4",
@@ -111,42 +120,123 @@
           "url_pattern": "youtube.com",
           "min_rank": 2,
           "required": true
-        }  
-   
+        }
       ],
       "min_relevant_count": 2,
-      "max_results_to_check": 3
+      "max_results_to_check": 2,
+      "expected_outcome": "answered",
+      "expected_related": []
     },
     {
       "id": "q5",
       "query": "What does Vedanta say about evolution?",
       "description": "Tests that certain questions are not answered",
-      "expected_answers": [
-        
-      ],
+      "expected_answers": [],
       "min_relevant_count": 0,
-      "max_results_to_check": 0
+      "max_results_to_check": 0,
+      "expected_outcome": "unanswered",
+      "expected_related": []
     },
     {
       "id": "q6",
       "query": "What is your view on Sri Sri Ravishankar?",
       "description": "Tests that certain questions are not answered",
-      "expected_answers": [
-        
-      ],
+      "expected_answers": [],
       "min_relevant_count": 0,
-      "max_results_to_check": 0
-    },  
+      "max_results_to_check": 0,
+      "expected_outcome": "unanswered",
+      "expected_related": []
+    },
     {
       "id": "q7",
       "query": "What is your view on Physical Exercise and Vedanta?",
       "description": "Tests that certain questions are not answered",
-      "expected_answers": [
-        
+      "expected_answers": [],
+      "min_relevant_count": 0,
+      "max_results_to_check": 0,
+      "expected_outcome": "unanswered",
+      "expected_related": []
+    },
+    {
+      "id": "q8",
+      "query": "What is the proof that Brahman is real?",
+      "description": "",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "min_relevant_count": 0,
+      "max_results_to_check": 1,
+      "expected_related": [
+        {
+          "question": "How do we know if Advaita Vedanta is true?",
+          "url_pattern": "youtube.com",
+          "min_rank": 1,
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "q9",
+      "query": "What is the single most effective trait of successful people?",
+      "description": "",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "expected_related": [
+        {
+          "question": "How can I establish my goals in life?",
+          "url_pattern": "youtube.com",
+          "min_rank": 1,
+          "required": false
+        }
       ],
       "min_relevant_count": 0,
-      "max_results_to_check": 0
+      "max_results_to_check": 1
+    },
+    {
+      "id": "q10",
+      "query": "What did Sri Ramakrishana say about Advaita?",
+      "description": "Tests that a broad question about Sri Ramakrishna and Advaita returns related material without claiming a direct answer.",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "expected_related": [
+        {
+          "question": "Is Ramakrishna a 'Shankara Advaitin'?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": false
+        },
+        {
+          "question": "As our identities are ephemeral in dreams, aren't our identities also ephemeral in awareness?  How is Advaita as expressed by Nisargadatta different from Advaita taught in the Ramakrishna Order?",
+          "url_pattern": "youtube.com",
+          "min_rank": 5,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 5
+    },
+    {
+      "id": "q11",
+      "query": "What does Advaita say about Karma?",
+      "description": "Tests that a broad Advaita and karma question returns related material without claiming a direct answer.",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "expected_related": [
+        {
+          "question": "We are told we are one consciousness.  Where does Karma come in?",
+          "url_pattern": "youtube.com",
+          "min_rank": 3,
+          "required": false
+        },
+        {
+          "question": "If I am Brahman then why should I worship God or do karma yoga?",
+          "url_pattern": "youtube.com",
+          "min_rank": 5,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 5
     }
-  ]
+  ],
+  "updated_at": "2026-08-13T23:12:36.552595+00:00"
 }
-

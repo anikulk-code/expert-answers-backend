@@ -7,6 +7,7 @@ Runs queries from golden_set.json and compares results with expected answers.
 import json
 import requests
 import sys
+import time
 from typing import Dict, List, Any
 from pathlib import Path
 from datetime import datetime
@@ -24,7 +25,7 @@ def load_golden_set() -> Dict[str, Any]:
         return json.load(f)
 
 
-def call_api(query: str, count: int = 5) -> Dict[str, Any]:
+def call_api(query: str, count: int = 5) -> tuple[Dict[str, Any] | None, float]:
     """Call the Expert Answers API with a query."""
     url = f"{API_BASE_URL}/api/answers/v1"
     params = {
@@ -33,12 +34,14 @@ def call_api(query: str, count: int = 5) -> Dict[str, Any]:
     }
     
     try:
+        started_at = time.perf_counter()
         response = requests.get(url, params=params, timeout=30)
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
         response.raise_for_status()
-        return response.json()
+        return response.json(), elapsed_ms
     except requests.exceptions.RequestException as e:
         print(f"  ❌ API Error: {e}")
-        return None
+        return None, elapsed_ms if "elapsed_ms" in locals() else 0.0
 
 
 def normalize_question(question: str) -> str:
@@ -46,7 +49,7 @@ def normalize_question(question: str) -> str:
     return question.lower().strip()
 
 
-def find_answer_in_results(expected: Dict[str, Any], actual_results: List[Dict[str, Any]]) -> tuple[bool, int]:
+def find_answer_in_results(expected: Dict[str, Any], actual_results: List[Dict[str, Any]], check_url: bool = True) -> tuple[bool, int]:
     """
     Check if expected answer is in actual results.
     Returns (found, rank) where rank is 1-based position, or 0 if not found.
@@ -59,7 +62,7 @@ def find_answer_in_results(expected: Dict[str, Any], actual_results: List[Dict[s
         # Check if question matches (exact or contains)
         if expected_question in actual_question or actual_question in expected_question:
             # Check URL pattern if specified
-            if "url_pattern" in expected:
+            if check_url and "url_pattern" in expected:
                 url = result.get("videoLink", "")
                 if expected["url_pattern"] not in url:
                     continue
@@ -73,7 +76,11 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
     """Evaluate a single query against the API."""
     query_id = query_data["id"]
     query_text = query_data["query"]
-    expected_answers = query_data.get("expected_answers", [])
+    legacy_answers = query_data.get("expected_answers", [])
+    expected_answers = [answer for answer in legacy_answers if answer.get("required", True)]
+    expected_related = query_data.get("expected_related", []) or [
+        answer for answer in legacy_answers if not answer.get("required", True)
+    ]
     min_relevant_count = query_data.get("min_relevant_count", 1)
     max_results_to_check = query_data.get("max_results_to_check", 5)
     
@@ -82,7 +89,7 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
     # Call API - use at least count=1 (API requires count >= 1)
     # For queries that should return 0 results, we still call with count=5 to see if API returns anything
     api_count = max(max_results_to_check, 1) if max_results_to_check == 0 else max_results_to_check
-    api_response = call_api(query_text, count=api_count)
+    api_response, latency_ms = call_api(query_text, count=api_count)
     if api_response is None:
         return {
             "query_id": query_id,
@@ -103,6 +110,10 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # Combine into one flat list for evaluation (relevant first, then not_relevant)
     actual_answers = relevant_answers + other_related
+    actual_related = [
+        {"questionTitle": question} if isinstance(question, str) else question
+        for question in (api_response.get("relatedQuestions", []) or [])
+    ]
     
     search_status = api_response.get("searchStatus", "unknown")
     
@@ -136,15 +147,44 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             status = "❌" if required else "⚠️"
             print(f"  {status} Missing: '{expected['question']}'")
+
+    related_evaluation_results = []
+    related_found_count = 0
+    for expected in expected_related:
+        found, rank = find_answer_in_results(expected, actual_related, check_url=False)
+        related_evaluation_results.append({
+            "expected_question": expected["question"],
+            "found": found,
+            "rank": rank,
+            "min_rank": expected.get("min_rank"),
+        })
+        if found:
+            related_found_count += 1
+            print(f"  ✅ Related: '{expected['question']}' at rank {rank}")
+        else:
+            print(f"  ⚠️ Missing related: '{expected['question']}'")
     
     # Calculate metrics
     total_expected = len(expected_answers)
     required_expected = sum(1 for e in expected_answers if e.get("required", False))
     required_found = sum(1 for r in evaluation_results if r["required"] and r["found"])
     
-    precision = found_count / len(actual_answers) if actual_answers else 0
-    recall = found_count / total_expected if total_expected > 0 else 0
+    precision = found_count / len(actual_answers) if actual_answers else (1.0 if not expected_answers else 0.0)
+    recall = found_count / total_expected if total_expected > 0 else 1.0
     required_recall = required_found / required_expected if required_expected > 0 else 1.0
+    related_recall = related_found_count / len(expected_related) if expected_related else 1.0
+    related_precision = related_found_count / len(actual_related) if actual_related else (1.0 if not expected_related else 0.0)
+
+    expected_outcome = query_data.get("expected_outcome", "answered" if expected_answers else "unanswered")
+    if relevant_answers:
+        actual_outcome = "answered"
+    elif actual_related:
+        actual_outcome = "related_only"
+    else:
+        actual_outcome = "unanswered"
+    outcome_correct = actual_outcome == expected_outcome
+    print(f"  Outcome: expected={expected_outcome}, actual={actual_outcome} {'✅' if outcome_correct else '❌'}")
+    print(f"  Latency: {latency_ms:.0f} ms")
     
     # Check if minimum relevant count is met
     min_count_met = len(actual_answers) >= min_relevant_count
@@ -153,6 +193,10 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
         "precision": round(precision, 3),
         "recall": round(recall, 3),
         "required_recall": round(required_recall, 3),
+        "related_recall": round(related_recall, 3),
+        "related_precision": round(related_precision, 3),
+        "outcome_correct": outcome_correct,
+        "latency_ms": round(latency_ms, 1),
         "found_count": found_count,
         "total_expected": total_expected,
         "required_found": required_found,
@@ -166,9 +210,13 @@ def evaluate_query(query_data: Dict[str, Any]) -> Dict[str, Any]:
         "query": query_text,
         "status": "success",
         "search_status": search_status,
+        "expected_outcome": expected_outcome,
+        "actual_outcome": actual_outcome,
         "evaluation_results": evaluation_results,
+        "related_evaluation_results": related_evaluation_results,
         "metrics": metrics,
-        "actual_answers": actual_answers[:max_results_to_check]  # Store for review
+        "actual_answers": actual_answers[:max_results_to_check],  # Store for review
+        "actual_related": actual_related[:max_results_to_check],
     }
 
 
@@ -200,8 +248,15 @@ def run_evaluation() -> Dict[str, Any]:
         avg_precision = sum(r["metrics"].get("precision", 0) for r in all_results if r["status"] == "success") / successful_queries
         avg_recall = sum(r["metrics"].get("recall", 0) for r in all_results if r["status"] == "success") / successful_queries
         avg_required_recall = sum(r["metrics"].get("required_recall", 0) for r in all_results if r["status"] == "success") / successful_queries
+        avg_related_recall = sum(r["metrics"].get("related_recall", 0) for r in all_results if r["status"] == "success") / successful_queries
+        avg_related_precision = sum(r["metrics"].get("related_precision", 0) for r in all_results if r["status"] == "success") / successful_queries
+        outcome_accuracy = sum(1 for r in all_results if r["status"] == "success" and r["metrics"].get("outcome_correct")) / successful_queries
+        latencies = sorted(r["metrics"].get("latency_ms", 0) for r in all_results if r["status"] == "success")
+        p50_latency = latencies[len(latencies) // 2]
+        p95_latency = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))]
     else:
-        avg_precision = avg_recall = avg_required_recall = 0
+        avg_precision = avg_recall = avg_required_recall = avg_related_recall = 0
+        avg_related_precision = outcome_accuracy = p50_latency = p95_latency = 0
     
     # Save results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,7 +272,12 @@ def run_evaluation() -> Dict[str, Any]:
             "failed_queries": total_queries - successful_queries,
             "average_precision": round(avg_precision, 3),
             "average_recall": round(avg_recall, 3),
-            "average_required_recall": round(avg_required_recall, 3)
+            "average_required_recall": round(avg_required_recall, 3),
+            "average_related_recall": round(avg_related_recall, 3),
+            "average_related_precision": round(avg_related_precision, 3),
+            "outcome_accuracy": round(outcome_accuracy, 3),
+            "p50_latency_ms": round(p50_latency, 1),
+            "p95_latency_ms": round(p95_latency, 1),
         },
         "results": all_results
     }
@@ -239,6 +299,10 @@ def run_evaluation() -> Dict[str, Any]:
     print(f"\nAverage Precision: {avg_precision:.3f}")
     print(f"Average Recall: {avg_recall:.3f}")
     print(f"Average Required Recall: {avg_required_recall:.3f}")
+    print(f"Average Related Recall: {avg_related_recall:.3f}")
+    print(f"Average Related Precision: {avg_related_precision:.3f}")
+    print(f"Outcome Accuracy: {outcome_accuracy:.3f}")
+    print(f"Latency p50/p95: {p50_latency:.0f}/{p95_latency:.0f} ms")
     print(f"\nResults saved to: {results_file}")
     print(f"Scores saved to: {SCORES_FILE}")
     
@@ -260,4 +324,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
