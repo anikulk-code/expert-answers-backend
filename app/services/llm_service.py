@@ -47,6 +47,14 @@ def create_chat_completion(messages, max_tokens: int = 300, response_format=None
         kwargs["response_format"] = response_format
     return openai_client.chat.completions.create(**kwargs)
 
+
+def completion_text(response) -> str:
+    """Return assistant text, treating missing GPT-5 content as empty."""
+    if not response or not response.choices:
+        return ""
+    content = response.choices[0].message.content
+    return (content or "").strip()
+
 # Cache for questions data
 _questions_cache = None
 _video_title_cache = None
@@ -178,8 +186,10 @@ Return ONLY this JSON object with 1-based indices:
         response_format={"type": "json_object"},
     )
     judge_ms = (time.perf_counter() - judge_started_at) * 1000
-    result_text = response.choices[0].message.content.strip()
+    result_text = completion_text(response)
     print(f"   🤖 LLM raw response: {result_text}")
+    if not result_text:
+        raise ValueError("LLM classification returned empty content")
     if result_text.startswith("```"):
         result_text = result_text.split("```")[1]
         if result_text.startswith("json"):

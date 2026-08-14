@@ -7,7 +7,7 @@ Service for processing questions and extracting computed values:
 
 import json
 from typing import List, Dict, Optional
-from app.services.llm_service import create_chat_completion
+from app.services.llm_service import completion_text, create_chat_completion
 
 
 def compute_canonical_text(question: str) -> str:
@@ -48,7 +48,7 @@ Canonical text:"""
             max_tokens=30,
         )
         
-        canonical = response.choices[0].message.content.strip()
+        canonical = completion_text(response)
         # Remove quotes if present
         canonical = canonical.strip('"').strip("'").strip()
         return canonical if canonical else question.lower()
@@ -128,7 +128,7 @@ Return ONLY the JSON object, no other text:"""
             max_tokens=200,
         )
         
-        result_text = response.choices[0].message.content.strip()
+        result_text = completion_text(response)
         if result_text.startswith("```"):
             result_text = result_text.split("```")[1]
             if result_text.startswith("json"):
