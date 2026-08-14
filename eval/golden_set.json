@@ -278,6 +278,35 @@
       ],
       "min_relevant_count": 0,
       "max_results_to_check": 4
+    },
+    {
+      "id": "q13",
+      "query": "Can vedanta help with handling interpersonal conflict?",
+      "description": "Tests that practical Vedanta and psychotherapy questions appear as related material for interpersonal conflict.",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "expected_related": [
+        {
+          "question": "How can I apply Vedanta to family life?",
+          "url_pattern": "youtube.com/watch?v=Zjb48bU5UGQ",
+          "min_rank": 3,
+          "required": false
+        },
+        {
+          "question": "How do I apply Vedanta to day-to-day life?",
+          "url_pattern": "youtube.com/watch?v=6e6FYMKvby8",
+          "min_rank": 3,
+          "required": false
+        },
+        {
+          "question": "Is there any overlap between psychotherapy and Vedanta?",
+          "url_pattern": "youtube.com/watch?v=s3TzA-r43X8",
+          "min_rank": 3,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 3
     }
   ],
   "updated_at": "2026-08-13T23:12:36.552595+00:00"
