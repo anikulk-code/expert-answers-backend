@@ -1,16 +1,34 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
+import threading
 
 from app.routers import answers, tags
 
 load_dotenv()
 
+
+def _warm_tags_cache():
+    try:
+        tags.warm_tags_cache()
+        print("Tags cache warmed")
+    except Exception as e:
+        print(f"Tags cache warm failed (Explore will fill it on first request): {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    threading.Thread(target=_warm_tags_cache, daemon=True).start()
+    yield
+
+
 app = FastAPI(
     title="Expert Answers API",
     description="API for retrieving expert answers from YouTube video segments",
-    version="0.1.1"  # Updated for Azure deployment
+    version="0.1.1",  # Updated for Azure deployment
+    lifespan=lifespan,
 )
 
 # CORS middleware

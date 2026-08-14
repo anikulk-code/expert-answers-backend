@@ -1,11 +1,21 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+import threading
+import time
 from app.services.cosmos_service import get_cosmos_container
 from app.services.youtube_service import get_video_thumbnail
 from app.services.llm_service import get_playlist_id
 
 router = APIRouter()
+
+# Topic counts and per-tag question lists rarely change. Cache in process
+# memory (no Redis in this app) so Explore is instant after the first fill.
+_TAGS_CACHE_TTL_SECONDS = 30 * 60
+_tags_cache_lock = threading.Lock()
+_tags_cache: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
+_questions_cache_lock = threading.Lock()
+_questions_cache: Dict[tuple, Dict[str, Any]] = {}
 
 # Display label -> the raw topic strings (lowercase, as stored) that fold into it.
 #
@@ -107,103 +117,118 @@ class TaggedQuestion(BaseModel):
     tags: List[str]
 
 
+def _compute_tags() -> List[TagInfo]:
+    """Query Cosmos for tag counts. Slow; callers should use the cache."""
+    container = get_cosmos_container()
+    tag_counts: Dict[str, int] = {}
+
+    for label, variants in TOPIC_GROUPS.items():
+        predicate, parameters = _topics_predicate(variants)
+        query = f"""
+        SELECT VALUE COUNT(1)
+        FROM c
+        WHERE {predicate}
+          AND IS_DEFINED(c.video_link)
+          AND c.video_link != null
+          AND c.video_link != ''
+        """
+
+        try:
+            result = list(container.query_items(
+                query=query,
+                parameters=parameters,
+                enable_cross_partition_query=True
+            ))
+            count = result[0] if result else 0
+            if count > 0:
+                tag_counts[label] = count
+        except Exception as e:
+            print(f"Error counting tag {label}: {e}")
+            import traceback
+            print(traceback.format_exc())
+            continue
+
+    # Count "Other" - questions that don't have any main tag
+    query = """
+    SELECT c.topics
+    FROM c
+    WHERE IS_DEFINED(c.topics)
+      AND IS_ARRAY(c.topics) = true
+      AND IS_DEFINED(c.video_link)
+      AND c.video_link != null
+      AND c.video_link != ''
+    """
+
+    try:
+        print("Counting 'Other' tag - this may take a moment...")
+        items = list(container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        print(f"Fetched {len(items)} items for 'Other' count")
+
+        other_count = 0
+        for item in items:
+            topics = item.get('topics', [])
+            if not isinstance(topics, list):
+                continue
+
+            has_main_tag = False
+            for topic in topics:
+                if topic and topic.lower().strip() in ALL_GROUPED_TOPICS:
+                    has_main_tag = True
+                    break
+
+            if not has_main_tag:
+                other_count += 1
+
+        if other_count > 0:
+            tag_counts['Other'] = other_count
+            print(f"Found {other_count} questions in 'Other' category")
+    except Exception as e:
+        print(f"Error counting Other: {e}")
+        import traceback
+        print(traceback.format_exc())
+
+    tags_list = [
+        TagInfo(tag=tag, count=count)
+        for tag, count in tag_counts.items()
+    ]
+
+    def sort_key(tag_info):
+        if tag_info.tag.lower() == "other":
+            return (1, tag_info.tag.lower())
+        return (0, tag_info.tag.lower())
+
+    tags = sorted(tags_list, key=sort_key)
+    print(f"Computed {len(tags)} tags")
+    return tags
+
+
+def get_cached_tags() -> List[TagInfo]:
+    now = time.monotonic()
+    with _tags_cache_lock:
+        payload = _tags_cache["payload"]
+        if payload is not None and now < _tags_cache["expires_at"]:
+            return payload
+
+    payload = _compute_tags()
+    with _tags_cache_lock:
+        _tags_cache["payload"] = payload
+        _tags_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
+    return payload
+
+
+def warm_tags_cache() -> None:
+    """Fill the tags cache so the first Explore request is not a Cosmos scan."""
+    get_cached_tags()
+
+
 @router.get("/tags", response_model=List[TagInfo])
 async def get_tags():
     """Get all available tags with question counts from Cosmos DB."""
     try:
-        container = get_cosmos_container()
-
-        # Count questions for each main tag using COUNT queries (fast)
-        tag_counts: Dict[str, int] = {}
-        
-        for label, variants in TOPIC_GROUPS.items():
-            predicate, parameters = _topics_predicate(variants)
-            query = f"""
-            SELECT VALUE COUNT(1)
-            FROM c
-            WHERE {predicate}
-              AND IS_DEFINED(c.video_link)
-              AND c.video_link != null
-              AND c.video_link != ''
-            """
-
-            try:
-                result = list(container.query_items(
-                    query=query,
-                    parameters=parameters,
-                    enable_cross_partition_query=True
-                ))
-                count = result[0] if result else 0
-                if count > 0:
-                    tag_counts[label] = count
-            except Exception as e:
-                print(f"Error counting tag {label}: {e}")
-                import traceback
-                print(traceback.format_exc())
-                continue
-        
-        # Count "Other" - questions that don't have any main tag
-        # We need to query all questions and filter in Python (Cosmos DB doesn't support NOT ARRAY_CONTAINS easily)
-        # But we can optimize by only fetching topics field
-        # NOTE: This query can be slow if there are many questions. Consider pagination or caching.
-        query = """
-        SELECT c.topics 
-        FROM c 
-        WHERE IS_DEFINED(c.topics) 
-          AND IS_ARRAY(c.topics) = true
-          AND IS_DEFINED(c.video_link) 
-          AND c.video_link != null 
-          AND c.video_link != ''
-        """
-        
-        try:
-            print("Counting 'Other' tag - this may take a moment...")
-            items = list(container.query_items(
-                query=query,
-                enable_cross_partition_query=True
-            ))
-            print(f"Fetched {len(items)} items for 'Other' count")
-            
-            other_count = 0
-            for item in items:
-                topics = item.get('topics', [])
-                if not isinstance(topics, list):
-                    continue
-                
-                # Check if question has any main tag
-                has_main_tag = False
-                for topic in topics:
-                    if topic and topic.lower().strip() in ALL_GROUPED_TOPICS:
-                        has_main_tag = True
-                        break
-                
-                if not has_main_tag:
-                    other_count += 1
-            
-            if other_count > 0:
-                tag_counts['Other'] = other_count
-                print(f"Found {other_count} questions in 'Other' category")
-        except Exception as e:
-            print(f"Error counting Other: {e}")
-            import traceback
-            print(traceback.format_exc())
-        
-        # Convert to list and sort
-        tags_list = [
-            TagInfo(tag=tag, count=count)
-            for tag, count in tag_counts.items()
-        ]
-        
-        # Sort alphabetically, but put "Other" at the end
-        def sort_key(tag_info):
-            if tag_info.tag.lower() == "other":
-                return (1, tag_info.tag.lower())
-            return (0, tag_info.tag.lower())
-        
-        tags = sorted(tags_list, key=sort_key)
-        print(f"Returning {len(tags)} tags")
-        return tags
-    
+        return get_cached_tags()
     except Exception as e:
         print(f"Error in get_tags endpoint: {e}")
         import traceback
@@ -214,6 +239,13 @@ async def get_tags():
 @router.get("/tags/{tag}/questions", response_model=List[Dict])
 async def get_questions_by_tag(tag: str, include_thumbnails: bool = Query(False, description="Include thumbnails (slower but better UX)")):
     """Get all questions for a specific tag from Cosmos DB."""
+    cache_key = (tag.lower(), include_thumbnails)
+    now = time.monotonic()
+    with _questions_cache_lock:
+        cached = _questions_cache.get(cache_key)
+        if cached and now < cached["expires_at"]:
+            return cached["payload"]
+
     container = get_cosmos_container()
 
     tag_lower = tag.lower()
@@ -276,6 +308,11 @@ async def get_questions_by_tag(tag: str, include_thumbnails: bool = Query(False,
                 "playlistId": playlist_id
             })
         
+        with _questions_cache_lock:
+            _questions_cache[cache_key] = {
+                "expires_at": time.monotonic() + _TAGS_CACHE_TTL_SECONDS,
+                "payload": questions,
+            }
         return questions
     
     # For specific tags, resolve the display label to its topic group
@@ -331,7 +368,12 @@ async def get_questions_by_tag(tag: str, include_thumbnails: bool = Query(False,
             "questionTitle": item.get('questionText', ''),
             "playlistId": playlist_id
         })
-    
+
+    with _questions_cache_lock:
+        _questions_cache[cache_key] = {
+            "expires_at": time.monotonic() + _TAGS_CACHE_TTL_SECONDS,
+            "payload": questions,
+        }
     return questions
 
 
