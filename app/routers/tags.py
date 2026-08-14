@@ -14,8 +14,8 @@ router = APIRouter()
 _TAGS_CACHE_TTL_SECONDS = 60 * 24 * 60 * 60
 _tags_cache_lock = threading.Lock()
 _tags_cache: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
-_questions_cache_lock = threading.Lock()
-_questions_cache: Dict[tuple, Dict[str, Any]] = {}
+_corpus_lock = threading.Lock()
+_corpus_cache: Dict[str, Any] = {"expires_at": 0.0, "items": None}
 
 # Display label -> the raw topic strings (lowercase, as stored) that fold into it.
 #
@@ -75,17 +75,62 @@ def get_main_tags() -> List[str]:
     return list(TOPIC_GROUPS.keys())
 
 
-def _topics_predicate(variants: List[str]) -> tuple:
-    """Build a SQL predicate matching a document tagged with ANY variant.
+def _normalize_topics(topics) -> List[str]:
+    if not isinstance(topics, list):
+        return []
+    return [t.lower().strip() for t in topics if t]
 
-    Returns (predicate_sql, parameters). COUNT(1) over this counts documents,
-    so a question tagged both 'enlightenment' and 'liberation' counts once.
+
+def get_answered_corpus() -> List[Dict]:
+    """One Cosmos scan of answered questions; reused for tag counts and chip clicks."""
+    now = time.monotonic()
+    with _corpus_lock:
+        items = _corpus_cache["items"]
+        if items is not None and now < _corpus_cache["expires_at"]:
+            return items
+
+    container = get_cosmos_container()
+    query = """
+    SELECT c.questionText, c.video_link, c.topics
+    FROM c
+    WHERE IS_DEFINED(c.video_link)
+      AND c.video_link != null
+      AND c.video_link != ''
     """
-    clauses = " OR ".join(
-        f"ARRAY_CONTAINS(c.topics, @t{i}, true)" for i in range(len(variants))
-    )
-    params = [{"name": f"@t{i}", "value": v} for i, v in enumerate(variants)]
-    return f"({clauses})", params
+    print("Loading answered questions corpus for Explore...")
+    items = list(container.query_items(
+        query=query,
+        enable_cross_partition_query=True
+    ))
+    print(f"Loaded {len(items)} answered questions into Explore cache")
+    with _corpus_lock:
+        _corpus_cache["items"] = items
+        _corpus_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
+    return items
+
+
+def _format_explore_question(item: Dict, include_thumbnails: bool = False) -> Dict:
+    video_link = item.get('video_link', '')
+    base_url = video_link.split('&t=')[0] if '&t=' in video_link else video_link
+    video_id = base_url.split('watch?v=')[1] if 'watch?v=' in base_url else None
+    timestamp = _extract_timestamp_from_url(video_link)
+    thumbnail = None
+    playlist_id = None
+    if include_thumbnails and video_id:
+        thumbnail = get_video_thumbnail(video_id)
+        playlist_id = get_playlist_id(video_id)
+    return {
+        "videoLink": base_url,
+        "time": timestamp,
+        "speakers": "Sarvapriyananda",
+        "date": "2024-01-01",
+        "region": None,
+        "score": None,
+        "answerViewPoint": None,
+        "thumbnail": thumbnail,
+        "questionTitle": item.get('questionText', ''),
+        "playlistId": playlist_id
+    }
 
 
 def _extract_timestamp_from_url(video_link: str) -> str:
@@ -118,77 +163,22 @@ class TaggedQuestion(BaseModel):
 
 
 def _compute_tags() -> List[TagInfo]:
-    """Query Cosmos for tag counts. Slow; callers should use the cache."""
-    container = get_cosmos_container()
+    """Count tags from the in-memory answered corpus."""
     tag_counts: Dict[str, int] = {}
+    other_count = 0
 
-    for label, variants in TOPIC_GROUPS.items():
-        predicate, parameters = _topics_predicate(variants)
-        query = f"""
-        SELECT VALUE COUNT(1)
-        FROM c
-        WHERE {predicate}
-          AND IS_DEFINED(c.video_link)
-          AND c.video_link != null
-          AND c.video_link != ''
-        """
+    for item in get_answered_corpus():
+        topics = _normalize_topics(item.get('topics'))
+        has_main_tag = False
+        for label, variants in TOPIC_GROUPS.items():
+            if any(topic in variants for topic in topics):
+                tag_counts[label] = tag_counts.get(label, 0) + 1
+                has_main_tag = True
+        if topics and not has_main_tag:
+            other_count += 1
 
-        try:
-            result = list(container.query_items(
-                query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
-            ))
-            count = result[0] if result else 0
-            if count > 0:
-                tag_counts[label] = count
-        except Exception as e:
-            print(f"Error counting tag {label}: {e}")
-            import traceback
-            print(traceback.format_exc())
-            continue
-
-    # Count "Other" - questions that don't have any main tag
-    query = """
-    SELECT c.topics
-    FROM c
-    WHERE IS_DEFINED(c.topics)
-      AND IS_ARRAY(c.topics) = true
-      AND IS_DEFINED(c.video_link)
-      AND c.video_link != null
-      AND c.video_link != ''
-    """
-
-    try:
-        print("Counting 'Other' tag - this may take a moment...")
-        items = list(container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        print(f"Fetched {len(items)} items for 'Other' count")
-
-        other_count = 0
-        for item in items:
-            topics = item.get('topics', [])
-            if not isinstance(topics, list):
-                continue
-
-            has_main_tag = False
-            for topic in topics:
-                if topic and topic.lower().strip() in ALL_GROUPED_TOPICS:
-                    has_main_tag = True
-                    break
-
-            if not has_main_tag:
-                other_count += 1
-
-        if other_count > 0:
-            tag_counts['Other'] = other_count
-            print(f"Found {other_count} questions in 'Other' category")
-    except Exception as e:
-        print(f"Error counting Other: {e}")
-        import traceback
-        print(traceback.format_exc())
+    if other_count > 0:
+        tag_counts['Other'] = other_count
 
     tags_list = [
         TagInfo(tag=tag, count=count)
@@ -220,7 +210,8 @@ def get_cached_tags() -> List[TagInfo]:
 
 
 def warm_tags_cache() -> None:
-    """Fill the tags cache so the first Explore request is not a Cosmos scan."""
+    """Fill the answered corpus so Explore chips and lists are in memory."""
+    get_answered_corpus()
     get_cached_tags()
 
 
@@ -238,173 +229,41 @@ async def get_tags():
 
 @router.get("/tags/{tag}/questions", response_model=List[Dict])
 async def get_questions_by_tag(tag: str, include_thumbnails: bool = Query(False, description="Include thumbnails (slower but better UX)")):
-    """Get all questions for a specific tag from Cosmos DB."""
-    cache_key = (tag.lower(), include_thumbnails)
-    now = time.monotonic()
-    with _questions_cache_lock:
-        cached = _questions_cache.get(cache_key)
-        if cached and now < cached["expires_at"]:
-            return cached["payload"]
-
-    container = get_cosmos_container()
-
+    """Get all questions for a specific tag from the in-memory corpus."""
     tag_lower = tag.lower()
-    
-    # Handle "Other" tag - questions that don't have any main tags
+    items = get_answered_corpus()
+    questions = []
+
     if tag_lower == "other":
-        # Build query to exclude all main tags
-        query = """
-        SELECT c.id, c.questionText, c.video_link, c.topics
-        FROM c
-        WHERE IS_DEFINED(c.video_link) 
-          AND c.video_link != null 
-          AND c.video_link != ''
-          AND IS_DEFINED(c.topics) 
-          AND IS_ARRAY(c.topics) = true
-        """
-        
-        items = list(container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        
-        # Filter out questions that have any main tag
-        other_questions = []
         for item in items:
-            topics = item.get('topics', [])
-            has_main_tag = False
-            for topic in topics:
-                if topic and topic.lower().strip() in ALL_GROUPED_TOPICS:
-                    has_main_tag = True
-                    break
-            if not has_main_tag:
-                other_questions.append(item)
-        
-        questions = []
-        for item in other_questions:
-            # Extract timestamp from video_link if present
-            video_link = item.get('video_link', '')
-            base_url = video_link.split('&t=')[0] if '&t=' in video_link else video_link
-            video_id = base_url.split('watch?v=')[1] if 'watch?v=' in base_url else None
-            timestamp = _extract_timestamp_from_url(video_link)
-            
-            # Get thumbnail and playlist_id only if requested
-            thumbnail = None
-            playlist_id = None
-            if include_thumbnails and video_id:
-                thumbnail = get_video_thumbnail(video_id)
-                playlist_id = get_playlist_id(video_id)
-            
-            questions.append({
-                "videoLink": base_url,
-                "time": timestamp,
-                "speakers": "Sarvapriyananda",
-                "date": "2024-01-01",  # Placeholder
-                "region": None,
-                "score": None,
-                "answerViewPoint": None,
-                "thumbnail": thumbnail,
-                "questionTitle": item.get('questionText', ''),
-                "playlistId": playlist_id
-            })
-        
-        with _questions_cache_lock:
-            _questions_cache[cache_key] = {
-                "expires_at": time.monotonic() + _TAGS_CACHE_TTL_SECONDS,
-                "payload": questions,
-            }
+            topics = _normalize_topics(item.get('topics'))
+            if topics and not any(t in ALL_GROUPED_TOPICS for t in topics):
+                questions.append(_format_explore_question(item, include_thumbnails))
         return questions
-    
-    # For specific tags, resolve the display label to its topic group
+
     matching_label = next(
         (label for label in TOPIC_GROUPS if label.lower() == tag_lower), None
     )
-
     if not matching_label:
         return []
 
-    # Match questions carrying ANY topic variant in the group, so a question
-    # tagged 'liberation' surfaces under Enlightenment alongside the rest.
-    predicate, parameters = _topics_predicate(TOPIC_GROUPS[matching_label])
-    query = f"""
-    SELECT c.id, c.questionText, c.video_link, c.topics
-    FROM c
-    WHERE {predicate}
-      AND IS_DEFINED(c.video_link)
-      AND c.video_link != null
-      AND c.video_link != ''
-    """
-
-    items = list(container.query_items(
-        query=query,
-        parameters=parameters,
-        enable_cross_partition_query=True
-    ))
-    
-    # Convert to response format (AnswerResponse format)
-    questions = []
+    variants = set(TOPIC_GROUPS[matching_label])
     for item in items:
-        video_link = item.get('video_link', '')
-        base_url = video_link.split('&t=')[0] if '&t=' in video_link else video_link
-        video_id = base_url.split('watch?v=')[1] if 'watch?v=' in base_url else None
-        timestamp = _extract_timestamp_from_url(video_link)
-        
-        # Get thumbnail and playlist_id only if requested
-        thumbnail = None
-        playlist_id = None
-        if include_thumbnails and video_id:
-            thumbnail = get_video_thumbnail(video_id)
-            playlist_id = get_playlist_id(video_id)
-        
-        questions.append({
-            "videoLink": base_url,
-            "time": timestamp,
-            "speakers": "Sarvapriyananda",
-            "date": "2024-01-01",  # Placeholder
-            "region": None,
-            "score": None,
-            "answerViewPoint": None,
-            "thumbnail": thumbnail,
-            "questionTitle": item.get('questionText', ''),
-            "playlistId": playlist_id
-        })
-
-    with _questions_cache_lock:
-        _questions_cache[cache_key] = {
-            "expires_at": time.monotonic() + _TAGS_CACHE_TTL_SECONDS,
-            "payload": questions,
-        }
+        topics = _normalize_topics(item.get('topics'))
+        if any(t in variants for t in topics):
+            questions.append(_format_explore_question(item, include_thumbnails))
     return questions
 
 
 @router.get("/tags/search", response_model=List[Dict])
 async def search_questions_by_topic(query: str, include_thumbnails: bool = Query(False, description="Include thumbnails (slower but better UX)")):
-    """Search questions by topic/keyword in Cosmos DB."""
+    """Search questions by topic/keyword against the in-memory corpus."""
     if not query or not query.strip():
         return []
-    
-    container = get_cosmos_container()
+
     query_lower = query.lower().strip()
     query_words = query_lower.split()
-    
-    # Build query to search in topics array and question text
-    # We'll do case-insensitive matching in Python for now
-    # (Cosmos DB ARRAY_CONTAINS with true flag does case-insensitive, but we need partial matching)
-    
-    sql_query = """
-    SELECT c.id, c.questionText, c.video_link, c.topics
-    FROM c
-    WHERE IS_DEFINED(c.video_link) 
-      AND c.video_link != null 
-      AND c.video_link != ''
-      AND IS_DEFINED(c.topics) 
-      AND IS_ARRAY(c.topics) = true
-    """
-    
-    items = list(container.query_items(
-        query=sql_query,
-        enable_cross_partition_query=True
-    ))
+    items = get_answered_corpus()
     
     # Filter in Python for flexible matching
     matching_items = []
@@ -435,57 +294,8 @@ async def search_questions_by_topic(query: str, include_thumbnails: bool = Query
         
         if matches:
             matching_items.append(item)
-    
-    # Convert to response format (AnswerResponse format)
-    questions = []
-    
-    # Fetch thumbnails sequentially if requested (safer than parallel, avoids SSL issues)
-    if include_thumbnails and matching_items:
-        for item in matching_items:
-            video_link = item.get('video_link', '')
-            base_url = video_link.split('&t=')[0] if '&t=' in video_link else video_link
-            video_id = base_url.split('watch?v=')[1] if 'watch?v=' in base_url else None
-            timestamp = _extract_timestamp_from_url(video_link)
-            
-            thumbnail = None
-            playlist_id = None
-            if video_id:
-                thumbnail = get_video_thumbnail(video_id)
-                playlist_id = get_playlist_id(video_id)
-            
-            questions.append({
-                "videoLink": base_url,
-                "time": timestamp,
-                "speakers": "Sarvapriyananda",
-                "date": "2024-01-01",  # Placeholder
-                "region": None,
-                "score": None,
-                "answerViewPoint": None,
-                "thumbnail": thumbnail,
-                "questionTitle": item.get('questionText', ''),
-                "playlistId": playlist_id
-            })
-    else:
-        # Fast path: skip thumbnails
-        for item in matching_items:
-            video_link = item.get('video_link', '')
-            base_url = video_link.split('&t=')[0] if '&t=' in video_link else video_link
-            timestamp = _extract_timestamp_from_url(video_link)
-            
-            questions.append({
-                "videoLink": base_url,
-                "time": timestamp,
-                "speakers": "Sarvapriyananda",
-                "date": "2024-01-01",  # Placeholder
-                "region": None,
-                "score": None,
-                "answerViewPoint": None,
-                "thumbnail": None,  # Skip thumbnail for faster response
-                "questionTitle": item.get('questionText', ''),
-                "playlistId": None
-            })
-    
-    return questions
+
+    return [_format_explore_question(item, include_thumbnails) for item in matching_items]
 
 
 @router.get("/thumbnails/{video_id}")
