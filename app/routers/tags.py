@@ -11,7 +11,7 @@ router = APIRouter()
 
 # Topic counts and per-tag question lists rarely change. Cache in process
 # memory (no Redis in this app) so Explore is instant after the first fill.
-_TAGS_CACHE_TTL_SECONDS = 30 * 60
+_TAGS_CACHE_TTL_SECONDS = 60 * 24 * 60 * 60
 _tags_cache_lock = threading.Lock()
 _tags_cache: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
 _questions_cache_lock = threading.Lock()
