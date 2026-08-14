@@ -127,6 +127,83 @@ def get_playlist_id(video_id: str) -> Optional[str]:
     lookup = get_playlist_id_lookup()
     return lookup.get(video_id)
 
+
+def classify_question_candidates(
+    user_query: str,
+    candidates: List[Dict],
+    max_answers: int = 3,
+    max_related: int = 5,
+) -> Dict[str, Any]:
+    """Classify retrieved database questions with one shared semantic judge."""
+    questions_text = "\n".join(
+        f"{index + 1}. {candidate.get('questionText', candidate.get('question', ''))}"
+        for index, candidate in enumerate(candidates)
+    )
+    prompt = f"""Classify existing database questions for a user's query.
+
+User's question: "{user_query}"
+
+Candidate questions from semantic retrieval ({len(candidates)} total):
+
+{questions_text}
+
+Put a candidate in answer_indices ONLY when it has the same core claim, intent,
+scope, and specific teaching as the user's question. An answer to that candidate
+must also satisfy the user without changing the subject.
+
+Treat broad synthesis requests such as "What did [teacher] say about [topic]?" or
+"What does [tradition] say about [topic]?" conservatively: a narrow sub-question is
+related, not direct, unless it offers the requested overview or closely paraphrases
+the whole question.
+
+Put a candidate in related_indices when it is genuinely useful nearby material but asks
+a different question or addresses only part of the user's intent. Shared vocabulary or
+a broad theme alone is not enough. Irrelevant candidates belong in neither list.
+
+The arrays must be disjoint. Prefer no match over a weak thematic match.
+Return up to {max_answers} answer indices and {max_related} related indices, best first.
+Return ONLY this JSON object with 1-based indices:
+{{"answer_indices": [3, 1], "related_indices": [4, 8]}}"""
+
+    judge_started_at = time.perf_counter()
+    response = create_chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a strict semantic question matcher. Separate direct matches from genuinely related questions and omit weak topical matches. Return valid JSON only.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=300,
+        response_format={"type": "json_object"},
+    )
+    judge_ms = (time.perf_counter() - judge_started_at) * 1000
+    result_text = response.choices[0].message.content.strip()
+    print(f"   🤖 LLM raw response: {result_text}")
+    if result_text.startswith("```"):
+        result_text = result_text.split("```")[1]
+        if result_text.startswith("json"):
+            result_text = result_text[4:]
+
+    classification = json.loads(result_text.strip())
+    if isinstance(classification, list):
+        classification = {"answer_indices": classification, "related_indices": []}
+    answer_indices = classification.get("answer_indices", [])
+    related_indices = classification.get("related_indices", [])
+    if not isinstance(answer_indices, list) or not isinstance(related_indices, list):
+        raise ValueError("LLM classification arrays are invalid")
+
+    direct_indices = {int(index) for index in answer_indices if str(index).isdigit()}
+    related_indices = [
+        index for index in related_indices
+        if str(index).isdigit() and int(index) not in direct_indices
+    ]
+    return {
+        "answer_indices": answer_indices[:max_answers],
+        "related_indices": related_indices[:max_related],
+        "judge_ms": judge_ms,
+    }
+
 def match_question_with_llm(user_query: str, top_n: int = 3) -> Dict[str, Any]:
     """
     Match user query to answered Q&A questions via vector search + a strict LLM judge.
@@ -166,77 +243,16 @@ def match_question_with_llm(user_query: str, top_n: int = 3) -> Dict[str, Any]:
             "timings": {"retrieval_ms": round(retrieval_ms, 1), "judge_ms": 0.0, "total_ms": round((time.perf_counter() - started_at) * 1000, 1)},
         }
     
-    # Convert Cosmos DB structure to format expected by LLM (questionText -> question, video_link -> url)
-    # Format questions for LLM context
-    questions_text = "\n".join([
-        f"{i+1}. {q.get('questionText', q.get('question', ''))}"
-        for i, q in enumerate(candidates)
-    ])
-    
     print(f"   📝 Sending {len(candidates)} candidates to LLM for filtering")
     print(f"   📝 First 3 candidate questions:")
     for i, q in enumerate(candidates[:3]):
         print(f"      {i+1}. {q.get('questionText', q.get('question', ''))[:60]}...")
     
-    # Step 2: One LLM call classifies the same retrieved candidates into direct
-    # answers and related material. Queue/upvote similarity remains deferred.
-    prompt = f"""Classify existing answered Q&A video questions for a user's query.
-
-User's question: "{user_query}"
-
-Candidate questions from vector search ({len(candidates)} total):
-
-{questions_text}
-
-Put a candidate in answer_indices ONLY if a viewer watching that Q&A segment would get
-a direct answer to the user's question (same core claim, intent, scope, and specific teaching).
-
-Treat broad synthesis requests such as "What did [teacher] say about [topic]?" or
-"What does [tradition] say about [topic]?" conservatively: a narrow sub-question about
-one aspect is related, not a direct answer. It is direct only when the candidate itself
-offers the requested overview or is a close paraphrase of the whole question. Likewise,
-evidence for an adjacent doctrine is related rather than proof of the user's exact claim.
-
-Put a candidate in related_indices when it is genuinely useful nearby material but asks
-a different question or only addresses part of the user's intent. Shared vocabulary or a
-broad theme alone is not enough. Irrelevant candidates belong in neither list.
-
-The two arrays must be disjoint. Prefer an empty answer_indices array over presenting a
-weak thematic match as an answer.
-
-Return up to {top_n} answer indices and up to 5 related indices, best match first.
-Return ONLY this JSON object with 1-based indices:
-{{"answer_indices": [3, 1], "related_indices": [4, 8]}}"""
-
     try:
-        judge_started_at = time.perf_counter()
-        response = create_chat_completion(
-            messages=[
-                {"role": "system", "content": "You are a strict retrieval judge. Separate direct answers from genuinely related material and omit weak topical matches. Return valid JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            response_format={"type": "json_object"},
-        )
-        judge_ms = (time.perf_counter() - judge_started_at) * 1000
-        
-        # Parse response
-        result_text = response.choices[0].message.content.strip()
-        print(f"   🤖 LLM raw response: {result_text}")
-        if result_text.startswith("```"):
-            result_text = result_text.split("```")[1]
-            if result_text.startswith("json"):
-                result_text = result_text[4:]
-        result_text = result_text.strip()
-        
-        classification = json.loads(result_text)
-        if isinstance(classification, list):
-            # Backward-compatible parsing for an older cached/model response.
-            classification = {"answer_indices": classification, "related_indices": []}
-        answer_indices = classification.get("answer_indices", [])
-        related_indices = classification.get("related_indices", [])
-        if not isinstance(answer_indices, list) or not isinstance(related_indices, list):
-            raise ValueError("LLM classification arrays are invalid")
+        classification = classify_question_candidates(user_query, candidates, top_n, 5)
+        answer_indices = classification["answer_indices"]
+        related_indices = classification["related_indices"]
+        judge_ms = classification["judge_ms"]
         print(f"   🤖 LLM returned answers={answer_indices}, related={related_indices}")
         
         # Get candidate questions (deduplicate by URL to avoid same question appearing multiple times)
@@ -270,8 +286,6 @@ Return ONLY this JSON object with 1-based indices:
                 hydrated.append(question_data)
             return hydrated
 
-        direct_index_set = {int(idx) for idx in answer_indices if str(idx).isdigit()}
-        related_indices = [idx for idx in related_indices if str(idx).isdigit() and int(idx) not in direct_index_set]
         final_matches = {
             "answers": hydrate(answer_indices, top_n),
             "related": hydrate(related_indices, 5),
@@ -423,7 +437,7 @@ Return ONLY the question text, nothing else."""
 
 def find_similar_questions_for_upvote(user_query: str, num_questions: int = 3) -> List[Dict]:
     """
-    Find similar unanswered questions via vector search (no topic parse, no LLM).
+    Find direct matches among unanswered questions with the shared search judge.
 
     Args:
         user_query: User's question
@@ -437,11 +451,27 @@ def find_similar_questions_for_upvote(user_query: str, num_questions: int = 3) -
     try:
         candidates = vector_search(
             user_query,
-            top_n=num_questions,
+            top_n=20,
             require_video_link=False,
         )
+        if not candidates:
+            return []
+
+        classification = classify_question_candidates(
+            user_query,
+            candidates,
+            max_answers=num_questions,
+            max_related=0,
+        )
         similar_questions = []
-        for question_data in candidates:
+        for raw_index in classification["answer_indices"]:
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= index <= len(candidates):
+                continue
+            question_data = candidates[index - 1]
             question_text = question_data.get('questionText', question_data.get('question', ''))
             if not question_text:
                 continue

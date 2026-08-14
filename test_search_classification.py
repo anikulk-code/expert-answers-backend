@@ -47,6 +47,30 @@ class SearchClassificationTests(unittest.TestCase):
         questions = [item["questionText"] for item in results]
         self.assertIn("We are told we are one consciousness.\u00a0 Where does Karma come in?", questions)
 
+    @patch("app.services.llm_service.create_chat_completion")
+    @patch("app.services.search_service.vector_search")
+    def test_upvote_matches_use_same_judge_and_only_direct_results(
+        self, vector_search, create_completion
+    ):
+        vector_search.return_value = [
+            {"questionText": "Same underlying request", "voteUp": 4},
+            {"questionText": "Merely related request", "voteUp": 20},
+        ]
+        create_completion.return_value = completion({
+            "answer_indices": [1],
+            "related_indices": [2],
+        })
+
+        results = llm_service.find_similar_questions_for_upvote("user question", 5)
+
+        self.assertEqual(
+            [{"question": "Same underlying request", "upvotes": 4}],
+            results,
+        )
+        vector_search.assert_called_once_with(
+            "user question", top_n=20, require_video_link=False
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

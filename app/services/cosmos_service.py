@@ -308,34 +308,6 @@ def get_questions_queue(limit: int = 50, sort_by: str = "votes") -> List[Dict]:
     
     return items[:limit]
 
-def find_similar_questions_in_queue(user_question: str, limit: int = 5) -> List[Dict]:
-    """
-    Find similar questions in the queue that might be duplicates or related.
-    Uses simple text matching for now (can be enhanced with LLM later).
-    """
-    container = get_cosmos_container()
-    user_question_normalized = normalize_question(user_question)
-    
-    # Get all questions and filter for similarity
-    all_questions = get_questions_queue(limit=100)
-    
-    similar = []
-    user_words = set(user_question_normalized.split())
-    
-    for q in all_questions:
-        q_text_normalized = q.get("question_normalized", "")
-        q_words = set(q_text_normalized.split())
-        
-        # Simple similarity: check if questions share significant words
-        if q_text_normalized != user_question_normalized:
-            common_words = user_words.intersection(q_words)
-            if len(common_words) >= 2:  # At least 2 common words
-                similar.append(q)
-    
-    # Sort by votes (support both old and new schema) and return top matches
-    similar.sort(key=lambda x: x.get("voteUp", x.get("votes", x.get("upvotes", 0))), reverse=True)
-    return similar[:limit]
-
 def get_question_stats() -> Dict:
     """Get statistics about questions in the queue"""
     container = get_cosmos_container()
@@ -360,4 +332,3 @@ def get_question_stats() -> Dict:
         "total_questions": total_count,
         "total_votes": total_votes
     }
-

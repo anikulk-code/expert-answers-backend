@@ -22,7 +22,6 @@ from app.services.cosmos_service import (
     upvote_question,
     find_question_by_text,
     get_questions_queue,
-    find_similar_questions_in_queue
 )
 from app.services.search_service import search_all_methods
 
@@ -107,21 +106,9 @@ def _build_queue_info(question: str) -> QueueInfo:
             db_question_in_db = find_question_by_text(db_question)
             _append_similar(db_question, _question_votes(db_question_in_db), db_question_in_db is not None)
 
-    try:
-        similar_queue_questions = find_similar_questions_in_queue(question, limit=5)
-        for queue_item in similar_queue_questions:
-            queue_question = queue_item.get("question", "")
-            _append_similar(
-                queue_question,
-                queue_item.get("voteUp", queue_item.get("votes", queue_item.get("upvotes", 0))) or 0,
-                True,
-            )
-    except Exception as e:
-        print(f"Error finding similar questions in queue: {e}")
-
-    similar_questions_for_upvote = sorted(
-        similar_questions_for_upvote, key=lambda x: x.upvotes, reverse=True
-    )[:5]
+    # Preserve semantic rank from the shared matcher. Votes are metadata, not a
+    # substitute for relevance, so they must not reorder weaker candidates first.
+    similar_questions_for_upvote = similar_questions_for_upvote[:5]
     return QueueInfo(
         questionInQueue=in_queue,
         upvotes=upvotes,
