@@ -255,6 +255,29 @@
       ],
       "min_relevant_count": 2,
       "max_results_to_check": 5
+    },
+    {
+      "id": "q12",
+      "query": "Can vedanta help with stress reduction?",
+      "description": "Tests that stress-related Vedanta matches are substantive and excludes generic meditation questions.",
+      "expected_outcome": "related_only",
+      "expected_answers": [],
+      "expected_related": [
+        {
+          "question": "Is there any overlap between psychotherapy and Vedanta?",
+          "url_pattern": "youtube.com/watch?v=s3TzA-r43X8",
+          "min_rank": 4,
+          "required": false
+        },
+        {
+          "question": "Do spiritual practices (meditation, mantra, japa, prayer etc.) give us a window of opportunity to choose our reaction to thoughts instead of reacting automatically/instinctively?",
+          "url_pattern": "youtube.com/watch?v=JGKrAEJ-DbQ",
+          "min_rank": 4,
+          "required": false
+        }
+      ],
+      "min_relevant_count": 0,
+      "max_results_to_check": 4
     }
   ],
   "updated_at": "2026-08-13T23:12:36.552595+00:00"
