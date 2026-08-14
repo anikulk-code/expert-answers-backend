@@ -217,24 +217,43 @@
     {
       "id": "q11",
       "query": "What does Advaita say about Karma?",
-      "description": "Tests that a broad Advaita and karma question returns related material without claiming a direct answer.",
-      "expected_outcome": "related_only",
-      "expected_answers": [],
+      "description": "Tests that the two strongest Karma matches are direct answers and the remaining useful matches appear as related.",
+      "expected_outcome": "answered",
+      "expected_answers": [
+        {
+          "question": "- If same Brahman is residing in me and others, how is my Karma my own, why don't I share somebody else's Karma or vice versa?",
+          "url_pattern": "youtube.com/watch?v=l_vmlYMfsdQ",
+          "min_rank": 5,
+          "required": true
+        },
+        {
+          "question": "If we are all same, the witness consciousness or God how does the Law of Karma affect us?",
+          "url_pattern": "youtube.com/watch?v=4nrlQxDmK_4",
+          "min_rank": 5,
+          "required": true
+        }
+      ],
       "expected_related": [
         {
-          "question": "We are told we are one consciousness.  Where does Karma come in?",
-          "url_pattern": "youtube.com",
-          "min_rank": 3,
+          "question": "What is Advaita Vedanta’s standpoint on karmic liability that leads to rebirth?",
+          "url_pattern": "youtube.com/watch?v=UFRp9FYqQDw",
+          "min_rank": 5,
           "required": false
         },
         {
-          "question": "If I am Brahman then why should I worship God or do karma yoga?",
+          "question": "We are told we are one consciousness.  Where does Karma come in?",
           "url_pattern": "youtube.com",
+          "min_rank": 5,
+          "required": false
+        },
+        {
+          "question": "If there is ultimately no free will, how is Karma applicable?",
+          "url_pattern": "youtube.com/watch?v=hRp1mkuRBYU",
           "min_rank": 5,
           "required": false
         }
       ],
-      "min_relevant_count": 0,
+      "min_relevant_count": 2,
       "max_results_to_check": 5
     }
   ],
