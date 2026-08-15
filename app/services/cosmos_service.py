@@ -1,8 +1,9 @@
 import os
 from typing import List, Dict, Optional
 from datetime import datetime
-from azure.cosmos import CosmosClient, PartitionKey, exceptions
+from azure.cosmos import CosmosClient, exceptions
 from dotenv import load_dotenv
+import time
 import uuid
 from app.services.question_processor import process_question
 
@@ -25,63 +26,31 @@ def get_cosmos_client():
     if _cosmos_client is None:
         if not COSMOS_ENDPOINT or not COSMOS_KEY:
             raise ValueError("AZURE_COSMOS_ENDPOINT and AZURE_COSMOS_KEY must be set in environment variables")
+        t0 = time.monotonic()
+        print("[cosmos] CosmosClient init start")
         _cosmos_client = CosmosClient(COSMOS_ENDPOINT, COSMOS_KEY)
+        print(f"[cosmos] CosmosClient init done ms={(time.monotonic() - t0) * 1000:.0f}")
     return _cosmos_client
 
 def get_cosmos_database():
-    """Get or create the Cosmos DB database"""
+    """Return the existing Cosmos DB database client (no management-plane create)."""
     global _cosmos_database
     if _cosmos_database is None:
+        t0 = time.monotonic()
         client = get_cosmos_client()
-        try:
-            _cosmos_database = client.create_database_if_not_exists(id=COSMOS_DATABASE_NAME)
-        except exceptions.CosmosAccessConditionFailedError:
-            _cosmos_database = client.get_database_client(COSMOS_DATABASE_NAME)
+        _cosmos_database = client.get_database_client(COSMOS_DATABASE_NAME)
+        print(f"[cosmos] database client ready ms={(time.monotonic() - t0) * 1000:.0f}")
     return _cosmos_database
 
 def get_cosmos_container():
-    """Get or create the Cosmos DB container for questions"""
+    """Return the existing questions container client (no create-if-not-exists on reads)."""
     global _cosmos_container
     if _cosmos_container is None:
+        t0 = time.monotonic()
+        print("[cosmos] container client init start")
         database = get_cosmos_database()
-        try:
-            # Check if vector search is enabled (via environment variable)
-            # If enabled, we'll add vector index policy
-            # Note: Vector indexes can only be applied to NEW containers
-            # For existing containers, use setup_vector_index.py script
-            
-            indexing_policy = None
-            vector_search_enabled = os.getenv("COSMOS_VECTOR_SEARCH_ENABLED", "false").lower() == "true"
-            
-            if vector_search_enabled:
-                # Vector index policy for text-embedding-3-large (3072 dimensions)
-                indexing_policy = {
-                    "indexingMode": "consistent",
-                    "automatic": True,
-                    "includedPaths": [{"path": "/*"}],
-                    "excludedPaths": [{"path": "/\"_etag\"/?"}],
-                    "vectorIndexes": [
-                        {
-                            "path": "/embedding",
-                            "type": "flat"  # flat, quantizedFlat, or DiskANN
-                        }
-                    ]
-                }
-            
-            # For serverless accounts, don't specify offer_throughput
-            if indexing_policy:
-                _cosmos_container = database.create_container_if_not_exists(
-                    id=COSMOS_CONTAINER_NAME,
-                    partition_key=PartitionKey(path="/id"),
-                    indexing_policy=indexing_policy
-                )
-            else:
-                _cosmos_container = database.create_container_if_not_exists(
-                    id=COSMOS_CONTAINER_NAME,
-                    partition_key=PartitionKey(path="/id")
-                )
-        except exceptions.CosmosAccessConditionFailedError:
-            _cosmos_container = database.get_container_client(COSMOS_CONTAINER_NAME)
+        _cosmos_container = database.get_container_client(COSMOS_CONTAINER_NAME)
+        print(f"[cosmos] container client init done ms={(time.monotonic() - t0) * 1000:.0f}")
     return _cosmos_container
 
 def normalize_question(question: str) -> str:

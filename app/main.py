@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 import threading
+import time
 
 from app.routers import answers, tags
 
@@ -11,11 +12,15 @@ load_dotenv()
 
 
 def _warm_tags_cache():
+    t0 = time.monotonic()
+    print("[explore] lifespan warmup thread start")
     try:
         tags.warm_tags_cache()
-        print("Tags cache warmed")
+        print(f"[explore] lifespan warmup thread ok ms={(time.monotonic() - t0) * 1000:.0f}")
     except Exception as e:
-        print(f"Tags cache warm failed (Explore will fill it on first request): {e}")
+        print(
+            f"[explore] lifespan warmup failed after_ms={(time.monotonic() - t0) * 1000:.0f}: {e}"
+        )
 
 
 @asynccontextmanager

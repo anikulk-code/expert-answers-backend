@@ -87,26 +87,38 @@ def get_answered_corpus() -> List[Dict]:
     with _corpus_lock:
         items = _corpus_cache["items"]
         if items is not None and now < _corpus_cache["expires_at"]:
+            print(f"[explore] corpus cache HIT items={len(items)}")
             return items
 
-    container = get_cosmos_container()
-    query = """
-    SELECT c.questionText, c.video_link, c.topics
-    FROM c
-    WHERE IS_DEFINED(c.video_link)
-      AND c.video_link != null
-      AND c.video_link != ''
-    """
-    print("Loading answered questions corpus for Explore...")
-    items = list(container.query_items(
-        query=query,
-        enable_cross_partition_query=True
-    ))
-    print(f"Loaded {len(items)} answered questions into Explore cache")
-    with _corpus_lock:
+        # Hold the lock across the scan so concurrent /api/tags callers wait
+        # instead of each running their own cross-partition query.
+        t0 = time.monotonic()
+        print("[explore] corpus cache MISS — Cosmos scan starting")
+        container_t0 = time.monotonic()
+        container = get_cosmos_container()
+        print(
+            f"[explore] cosmos container ready ms={(time.monotonic() - container_t0) * 1000:.0f}"
+        )
+        query = """
+        SELECT c.questionText, c.video_link, c.topics
+        FROM c
+        WHERE IS_DEFINED(c.video_link)
+          AND c.video_link != null
+          AND c.video_link != ''
+        """
+        query_t0 = time.monotonic()
+        items = list(container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+        print(
+            f"[explore] cosmos query done items={len(items)} "
+            f"query_ms={(time.monotonic() - query_t0) * 1000:.0f} "
+            f"total_miss_ms={(time.monotonic() - t0) * 1000:.0f}"
+        )
         _corpus_cache["items"] = items
         _corpus_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
-    return items
+        return items
 
 
 def _format_explore_question(item: Dict, include_thumbnails: bool = False) -> Dict:
@@ -200,28 +212,46 @@ def get_cached_tags() -> List[TagInfo]:
     with _tags_cache_lock:
         payload = _tags_cache["payload"]
         if payload is not None and now < _tags_cache["expires_at"]:
+            print(f"[explore] tags cache HIT tags={len(payload)}")
             return payload
 
-    payload = _compute_tags()
-    with _tags_cache_lock:
+        t0 = time.monotonic()
+        print("[explore] tags cache MISS — computing from corpus")
+        payload = _compute_tags()
         _tags_cache["payload"] = payload
         _tags_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
-    return payload
+        print(
+            f"[explore] tags computed tags={len(payload)} "
+            f"ms={(time.monotonic() - t0) * 1000:.0f}"
+        )
+        return payload
 
 
 def warm_tags_cache() -> None:
     """Fill the answered corpus so Explore chips and lists are in memory."""
+    t0 = time.monotonic()
+    print("[explore] warmup start")
     get_answered_corpus()
     get_cached_tags()
+    print(f"[explore] warmup done ms={(time.monotonic() - t0) * 1000:.0f}")
 
 
 @router.get("/tags", response_model=List[TagInfo])
 async def get_tags():
     """Get all available tags with question counts from Cosmos DB."""
+    t0 = time.monotonic()
+    print("[explore] GET /api/tags start")
     try:
-        return get_cached_tags()
+        result = get_cached_tags()
+        print(
+            f"[explore] GET /api/tags done tags={len(result)} "
+            f"ms={(time.monotonic() - t0) * 1000:.0f}"
+        )
+        return result
     except Exception as e:
-        print(f"Error in get_tags endpoint: {e}")
+        print(
+            f"[explore] GET /api/tags error after_ms={(time.monotonic() - t0) * 1000:.0f}: {e}"
+        )
         import traceback
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error fetching tags: {str(e)}")
