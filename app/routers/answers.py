@@ -58,23 +58,6 @@ def _question_votes(doc: Optional[dict]) -> int:
     return doc.get("voteUp", doc.get("votes", doc.get("upvotes", 0))) or 0
 
 
-def _build_light_queue_info(question: str) -> QueueInfo:
-    """Cheap queue status only — no similar-question search."""
-    try:
-        question_in_db = find_question_queue_status(question)
-    except Exception as exc:
-        # Search results should not fail just because the optional queue store is
-        # temporarily inaccessible (for example, a Cosmos firewall restriction).
-        print(f"Queue status lookup unavailable: {exc}")
-        question_in_db = None
-    return QueueInfo(
-        questionInQueue=question_in_db is not None,
-        upvotes=_question_votes(question_in_db),
-        similarQuestions=None,
-        canPostNewQuestion=True,
-    )
-
-
 def _build_queue_info(question: str) -> QueueInfo:
     """Full queue info including similar unanswered questions (called when user requests)."""
     similar_db_questions_data = find_similar_questions_for_upvote(question, num_questions=5)
