@@ -20,7 +20,6 @@ router = APIRouter()
 from app.services.cosmos_service import (
     add_question_to_queue,
     upvote_question,
-    find_question_by_text,
     find_question_queue_status,
     get_questions_queue,
 )
