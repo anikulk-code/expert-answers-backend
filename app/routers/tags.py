@@ -1,8 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from datetime import datetime
 import threading
 import time
+from azure.cosmos import exceptions as cosmos_exceptions
 from app.services.cosmos_service import get_cosmos_container
 from app.services.youtube_service import get_video_thumbnail
 from app.services.llm_service import get_playlist_id
@@ -11,11 +13,18 @@ router = APIRouter()
 
 # Topic counts and per-tag question lists rarely change. Cache in process
 # memory (no Redis in this app) so Explore is instant after the first fill.
+# A single Cosmos "explore-cache" doc is the durable layer across restarts.
 _TAGS_CACHE_TTL_SECONDS = 60 * 24 * 60 * 60
+_EXPLORE_CACHE_ID = "explore-cache"
+_EXPLORE_CACHE_VERSION = 1
 _tags_cache_lock = threading.Lock()
 _tags_cache: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
 _corpus_lock = threading.Lock()
 _corpus_cache: Dict[str, Any] = {"expires_at": 0.0, "items": None}
+# Set by get_answered_corpus when hydrating from the cache doc or after a
+# rebuild+upsert. Consumed by get_cached_tags so /api/tags can skip recounting.
+# Never acquire _tags_cache_lock inside get_answered_corpus (deadlock risk).
+_pending_tags_from_doc: Optional[List["TagInfo"]] = None
 
 # Display label -> the raw topic strings (lowercase, as stored) that fold into it.
 #
@@ -81,8 +90,102 @@ def _normalize_topics(topics) -> List[str]:
     return [t.lower().strip() for t in topics if t]
 
 
+def _slim_corpus_item(item: Dict) -> Dict:
+    """Keep only fields Explore needs (and that we persist in the cache doc)."""
+    return {
+        "questionText": item.get("questionText", ""),
+        "video_link": item.get("video_link", ""),
+        "topics": item.get("topics") if isinstance(item.get("topics"), list) else [],
+    }
+
+
+def _parse_tags_from_cache_doc(doc: Dict) -> Optional[List["TagInfo"]]:
+    raw = doc.get("tags")
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        return [TagInfo(tag=str(t["tag"]), count=int(t["count"])) for t in raw]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _read_explore_cache_doc(container) -> Optional[Dict]:
+    """Point-read the durable Explore snapshot. Returns None on miss/error."""
+    t0 = time.monotonic()
+    try:
+        doc = container.read_item(
+            item=_EXPLORE_CACHE_ID,
+            partition_key=_EXPLORE_CACHE_ID,
+        )
+        ms = (time.monotonic() - t0) * 1000
+        items = doc.get("items") if isinstance(doc, dict) else None
+        usable = isinstance(items, list)
+        if usable:
+            print(
+                f"[explore] cache-doc HIT items={len(items)} "
+                f"point-read_ms={ms:.0f}"
+            )
+            return doc
+        print(
+            f"[explore] cache-doc MISS (invalid shape) point-read_ms={ms:.0f}"
+        )
+        return None
+    except cosmos_exceptions.CosmosResourceNotFoundError:
+        print(
+            f"[explore] cache-doc MISS point-read_ms={(time.monotonic() - t0) * 1000:.0f}"
+        )
+        return None
+    except Exception as e:
+        print(
+            f"[explore] cache-doc MISS (read error) "
+            f"point-read_ms={(time.monotonic() - t0) * 1000:.0f}: {e}"
+        )
+        return None
+
+
+def _upsert_explore_cache_doc(container, items: List[Dict], tags: List["TagInfo"]) -> None:
+    body = {
+        "id": _EXPLORE_CACHE_ID,
+        "version": _EXPLORE_CACHE_VERSION,
+        "updatedAt": datetime.utcnow().isoformat(),
+        "items": [_slim_corpus_item(i) for i in items],
+        "tags": [{"tag": t.tag, "count": t.count} for t in tags],
+    }
+    t0 = time.monotonic()
+    container.upsert_item(body=body)
+    print(
+        f"[explore] cache-doc upsert items={len(items)} tags={len(tags)} "
+        f"upsert_ms={(time.monotonic() - t0) * 1000:.0f}"
+    )
+
+
+def _scan_answered_corpus(container) -> List[Dict]:
+    query = """
+    SELECT c.questionText, c.video_link, c.topics
+    FROM c
+    WHERE IS_DEFINED(c.video_link)
+      AND c.video_link != null
+      AND c.video_link != ''
+    """
+    query_t0 = time.monotonic()
+    items = [
+        _slim_corpus_item(i)
+        for i in container.query_items(
+            query=query,
+            enable_cross_partition_query=True,
+        )
+    ]
+    print(
+        f"[explore] cosmos scan done items={len(items)} "
+        f"scan_ms={(time.monotonic() - query_t0) * 1000:.0f}"
+    )
+    return items
+
+
 def get_answered_corpus() -> List[Dict]:
-    """One Cosmos scan of answered questions; reused for tag counts and chip clicks."""
+    """Answered questions for Explore: memory → Cosmos cache doc → full scan."""
+    global _pending_tags_from_doc
+
     now = time.monotonic()
     with _corpus_lock:
         items = _corpus_cache["items"]
@@ -90,34 +193,47 @@ def get_answered_corpus() -> List[Dict]:
             print(f"[explore] corpus cache HIT items={len(items)}")
             return items
 
-        # Hold the lock across the scan so concurrent /api/tags callers wait
+        # Hold the lock across durable load / scan so concurrent callers wait
         # instead of each running their own cross-partition query.
         t0 = time.monotonic()
-        print("[explore] corpus cache MISS — Cosmos scan starting")
+        print("[explore] corpus cache MISS — loading durable snapshot")
         container_t0 = time.monotonic()
         container = get_cosmos_container()
         print(
             f"[explore] cosmos container ready ms={(time.monotonic() - container_t0) * 1000:.0f}"
         )
-        query = """
-        SELECT c.questionText, c.video_link, c.topics
-        FROM c
-        WHERE IS_DEFINED(c.video_link)
-          AND c.video_link != null
-          AND c.video_link != ''
-        """
-        query_t0 = time.monotonic()
-        items = list(container.query_items(
-            query=query,
-            enable_cross_partition_query=True
-        ))
-        print(
-            f"[explore] cosmos query done items={len(items)} "
-            f"query_ms={(time.monotonic() - query_t0) * 1000:.0f} "
-            f"total_miss_ms={(time.monotonic() - t0) * 1000:.0f}"
-        )
+
+        doc = _read_explore_cache_doc(container)
+        if doc is not None:
+            items = [_slim_corpus_item(i) for i in doc["items"]]
+            _corpus_cache["items"] = items
+            _corpus_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
+            pending_tags = _parse_tags_from_cache_doc(doc)
+            if pending_tags is not None:
+                _pending_tags_from_doc = pending_tags
+            print(
+                f"[explore] corpus hydrated from cache-doc items={len(items)} "
+                f"total_miss_ms={(time.monotonic() - t0) * 1000:.0f}"
+            )
+            return items
+
+        print("[explore] cache-doc MISS — Cosmos scan starting")
+        items = _scan_answered_corpus(container)
         _corpus_cache["items"] = items
         _corpus_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
+
+        # Compute tags + upsert while still single-flight under the corpus lock
+        # so the durable doc is written before other waiters return.
+        tags = _compute_tags_from_items(items)
+        _pending_tags_from_doc = tags
+        try:
+            _upsert_explore_cache_doc(container, items, tags)
+        except Exception as e:
+            print(f"[explore] cache-doc upsert failed: {e}")
+        print(
+            f"[explore] corpus hydrated from scan items={len(items)} "
+            f"total_miss_ms={(time.monotonic() - t0) * 1000:.0f}"
+        )
         return items
 
 
@@ -174,12 +290,12 @@ class TaggedQuestion(BaseModel):
     tags: List[str]
 
 
-def _compute_tags() -> List[TagInfo]:
-    """Count tags from the in-memory answered corpus."""
+def _compute_tags_from_items(items: List[Dict]) -> List[TagInfo]:
+    """Count tags from an answered-corpus items list."""
     tag_counts: Dict[str, int] = {}
     other_count = 0
 
-    for item in get_answered_corpus():
+    for item in items:
         topics = _normalize_topics(item.get('topics'))
         has_main_tag = False
         for label, variants in TOPIC_GROUPS.items():
@@ -208,6 +324,8 @@ def _compute_tags() -> List[TagInfo]:
 
 
 def get_cached_tags() -> List[TagInfo]:
+    global _pending_tags_from_doc
+
     now = time.monotonic()
     with _tags_cache_lock:
         payload = _tags_cache["payload"]
@@ -216,19 +334,26 @@ def get_cached_tags() -> List[TagInfo]:
             return payload
 
         t0 = time.monotonic()
-        print("[explore] tags cache MISS — computing from corpus")
-        payload = _compute_tags()
+        print("[explore] tags cache MISS — loading from corpus / cache-doc")
+        # Ensures corpus (+ optional pending tags from durable doc) are warm.
+        items = get_answered_corpus()
+        if _pending_tags_from_doc is not None:
+            payload = _pending_tags_from_doc
+            _pending_tags_from_doc = None
+            print(f"[explore] tags hydrated from cache-doc tags={len(payload)}")
+        else:
+            payload = _compute_tags_from_items(items)
         _tags_cache["payload"] = payload
         _tags_cache["expires_at"] = time.monotonic() + _TAGS_CACHE_TTL_SECONDS
         print(
-            f"[explore] tags computed tags={len(payload)} "
+            f"[explore] tags ready tags={len(payload)} "
             f"ms={(time.monotonic() - t0) * 1000:.0f}"
         )
         return payload
 
 
 def warm_tags_cache() -> None:
-    """Fill the answered corpus so Explore chips and lists are in memory."""
+    """Fill Explore caches, preferring the Cosmos explore-cache doc."""
     t0 = time.monotonic()
     print("[explore] warmup start")
     get_answered_corpus()
