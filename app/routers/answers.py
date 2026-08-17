@@ -128,6 +128,33 @@ class AnswersResponseV1(BaseModel):
     userMessage: Optional[str] = None  # User-facing message explaining the result
     searchTimings: Optional[Dict[str, float]] = None
 
+
+def _format_match_as_answer(match: Dict) -> Dict:
+    """Turn a hydrated LLM match into an AnswerResponse-shaped dict."""
+    url = match.get("url") or match.get("video_link") or ""
+    base_url = url.split("&t=")[0] if "&t=" in url else url
+    video_id = base_url.split("watch?v=")[1] if "watch?v=" in base_url else None
+    timestamp = match.get("timestamp", "00:00:00")
+    question_text = match.get("question_text") or match.get("question", "")
+
+    thumbnail = None
+    playlist_id = None
+    if video_id:
+        thumbnail = get_video_thumbnail(video_id)
+        playlist_id = get_playlist_id(video_id)
+
+    return {
+        "videoLink": base_url,
+        "time": timestamp,
+        "speakers": "Sarvapriyananda",
+        "date": "2024-01-01",
+        "region": None,
+        "score": str(match.get("match_rank", "")),
+        "answerViewPoint": None,
+        "thumbnail": thumbnail,
+        "questionTitle": question_text,
+        "playlistId": playlist_id,
+    }
 @router.get("/answers", response_model=List[AnswerResponse])
 async def get_answers(
     topic: str = Query(..., description="Topic of the question"),
@@ -250,42 +277,10 @@ async def get_answers_v1(
         
         if matches:
             # Format response to match AnswerResponse model
-            results = []
-            matched_question_texts = []
-            
-            for match in matches:
-                # Extract base video URL and video ID
-                url = match['url']
-                base_url = url.split('&t=')[0] if '&t=' in url else url
-                video_id = base_url.split('watch?v=')[1] if 'watch?v=' in base_url else None
-                
-                # Parse timestamp
-                timestamp = match.get('timestamp', '00:00:00')
-                
-                # Get thumbnail (sequential - YouTube API is usually fast)
-                thumbnail = None
-                playlist_id = None
-                if video_id:
-                    thumbnail = get_video_thumbnail(video_id)
-                    playlist_id = get_playlist_id(video_id)
-                
-                # Get question text
-                question_text = match.get('question_text') or match.get('question', '')
-                matched_question_texts.append(question_text)
-                
-                result = {
-                    "videoLink": base_url,
-                    "time": timestamp,
-                    "speakers": "Sarvapriyananda",  # Hardcoded for Version 1
-                    "date": "2024-01-01",  # Placeholder - not in simplified JSON
-                    "region": None,
-                    "score": str(match.get('match_rank', '')),
-                    "answerViewPoint": None,
-                    "thumbnail": thumbnail,
-                    "questionTitle": question_text,
-                    "playlistId": playlist_id
-                }
-                results.append(result)
+            results = [_format_match_as_answer(match) for match in matches]
+            matched_question_texts = [
+                result.get("questionTitle") or "" for result in results
+            ]
             
             # Get related question only if requested (adds an extra LLM call)
             related_question = None
@@ -316,16 +311,25 @@ async def get_answers_v1(
             
             return response
         
-        # Step 2: No direct answer. Preserve related answered questions from the
-        # same judge call; queue/upvote similarity still runs only on request.
+        # Step 2: No direct answer. Return related matches as full answer payloads
+        # so the client can open them without a second search.
+        related_results = [
+            _format_match_as_answer(match) for match in related_matches
+        ]
+        if not related_questions and related_results:
+            related_questions = [
+                result.get("questionTitle") or ""
+                for result in related_results
+                if result.get("questionTitle")
+            ]
         queue_info = _build_light_queue_info(question)
 
         return {
-            "answers": [],
+            "answers": related_results,
             "relatedQuestion": None,
             "relatedQuestions": related_questions or None,
             "youtubeSearchResults": None,
-            "searchStatus": "related_only" if related_questions else "unanswered",
+            "searchStatus": "related_only" if related_results or related_questions else "unanswered",
             "searchStage": "complete",
             "suggestedTags": None,
             "queueInfo": queue_info,
