@@ -91,20 +91,6 @@ def vector_search_cosmos(
         return []
     
     try:
-        # First, check if any embeddings exist
-        check_query = "SELECT VALUE COUNT(1) FROM c WHERE IS_ARRAY(c.embedding) = true AND ARRAY_LENGTH(c.embedding) > 0"
-        try:
-            embedding_count = list(container.query_items(
-                query=check_query,
-                enable_cross_partition_query=True
-            ))[0]
-            print(f"🔍 Found {embedding_count} questions with embeddings")
-            if embedding_count == 0:
-                print("⚠️  No embeddings found in database. Vector search requires embeddings to be generated first.")
-                return []
-        except Exception as e:
-            print(f"⚠️  Could not count embeddings: {e}")
-        
         # Use VectorDistance() function for vector search
         # VectorDistance(embedding, @queryVector, 'cosine') returns distance
         # Lower distance = more similar, so we order by distance ASC
@@ -121,33 +107,19 @@ def vector_search_cosmos(
             # Only return questions that DON'T have a video_link (unanswered questions in queue)
             video_link_filter = "AND (NOT IS_DEFINED(c.video_link) OR c.video_link = null OR c.video_link = '')"
         
-        # Use VectorDistance() function for vector search
-        # According to Azure docs: VectorDistance(embedding, queryVector, useExactSearch)
-        # - useExactSearch: true = exact search (brute force), false = indexed search
-        # - Results must be ordered by VectorDistance() to get similarity ranking
-        # - Can't use c.* with VectorDistance(), must select specific fields
-        # IMPORTANT: Use parameterized query to ensure Cosmos DB uses the correct vector for each query
+        # Select only fields needed downstream. Never return c.embedding
+        # (3072 floats × top_n) — it is unused except for debug and dominates payload size.
         query_sql = f"""
         SELECT TOP @top_n
             c.id,
             c.questionText,
-            c.normalizedText,
-            c.canonical_text,
             c.domain,
             c.topics,
             c.entities,
-            c.tags,
             c.video_link,
-            c.full_video_link,
-            c.playlist_link,
             c.voteUp,
-            c.timesAsked,
-            c.status,
-            c.createdAt,
-            c.updatedAt,
-            c.embedding,
-            c.embeddingModel,
-            c.embeddingDim,
+            c.votes,
+            c.upvotes,
             VectorDistance(c.embedding, @queryVector, @useExactSearch) AS vector_distance
         FROM c
         WHERE IS_ARRAY(c.embedding) = true
@@ -205,15 +177,6 @@ def vector_search_cosmos(
                 distances = [item.get('vector_distance') for item in items if item.get('vector_distance') is not None]
                 if len(distances) > 1:
                     print(f"   Distance range: min={min(distances):.4f}, max={max(distances):.4f}, unique_count={len(set(distances))}")
-                # CRITICAL: Log a sample of stored embeddings to verify they're different
-                if len(items) >= 2:
-                    emb1 = items[0].get('embedding', [])
-                    emb2 = items[1].get('embedding', [])
-                    if emb1 and emb2 and len(emb1) >= 3 and len(emb2) >= 3:
-                        print(f"   🔍 Stored embedding check:")
-                        print(f"      Result #1 embedding (first 3): {emb1[:3]}")
-                        print(f"      Result #2 embedding (first 3): {emb2[:3]}")
-                        print(f"      Are embeddings different? {emb1[:3] != emb2[:3]}")
         except Exception as query_error:
             error_msg = str(query_error)
             error_type = type(query_error).__name__

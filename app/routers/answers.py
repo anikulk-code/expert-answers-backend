@@ -21,6 +21,7 @@ from app.services.cosmos_service import (
     add_question_to_queue,
     upvote_question,
     find_question_by_text,
+    find_question_queue_status,
     get_questions_queue,
 )
 from app.services.search_service import search_all_methods
@@ -61,7 +62,7 @@ def _question_votes(doc: Optional[dict]) -> int:
 def _build_light_queue_info(question: str) -> QueueInfo:
     """Cheap queue status only — no similar-question search."""
     try:
-        question_in_db = find_question_by_text(question)
+        question_in_db = find_question_queue_status(question)
     except Exception as exc:
         # Search results should not fail just because the optional queue store is
         # temporarily inaccessible (for example, a Cosmos firewall restriction).
@@ -78,7 +79,7 @@ def _build_light_queue_info(question: str) -> QueueInfo:
 def _build_queue_info(question: str) -> QueueInfo:
     """Full queue info including similar unanswered questions (called when user requests)."""
     similar_db_questions_data = find_similar_questions_for_upvote(question, num_questions=5)
-    question_in_db = find_question_by_text(question)
+    question_in_db = find_question_queue_status(question)
     in_queue = question_in_db is not None
     upvotes = _question_votes(question_in_db)
     similar_questions_for_upvote = []
@@ -95,16 +96,18 @@ def _build_queue_info(question: str) -> QueueInfo:
             inQueue=in_queue_flag,
         ))
 
+    # Candidates already came from unanswered-queue vector search with voteUp —
+    # do not re-query each one via find_question_by_text (N+1).
     for q_data in similar_db_questions_data:
         if isinstance(q_data, dict):
-            db_question = q_data.get('question', '')
-            db_upvotes = q_data.get('upvotes', 0)
-            db_question_in_db = find_question_by_text(db_question)
-            _append_similar(db_question, db_upvotes, db_question_in_db is not None)
+            _append_similar(
+                q_data.get('question', ''),
+                q_data.get('upvotes', 0) or 0,
+                True,
+            )
         else:
-            db_question = q_data if isinstance(q_data, str) else q_data.get('question', '')
-            db_question_in_db = find_question_by_text(db_question)
-            _append_similar(db_question, _question_votes(db_question_in_db), db_question_in_db is not None)
+            text = q_data if isinstance(q_data, str) else ''
+            _append_similar(text, 0, True)
 
     # Preserve semantic rank from the shared matcher. Votes are metadata, not a
     # substitute for relevance, so they must not reorder weaker candidates first.
@@ -156,7 +159,7 @@ def _format_match_as_answer(match: Dict) -> Dict:
         "playlistId": playlist_id,
     }
 @router.get("/answers", response_model=List[AnswerResponse])
-async def get_answers(
+def get_answers(
     topic: str = Query(..., description="Topic of the question"),
     author: Optional[str] = Query(None, description="Filter by specific expert/author"),
     dateRange: Optional[str] = Query(None, description="Date range for videos (e.g., '2024-01-01,2024-12-31')"),
@@ -240,7 +243,7 @@ async def get_answers(
 _endpoint_response_cache = {}
 
 @router.get("/answers/v1", response_model=AnswersResponseV1)
-async def get_answers_v1(
+def get_answers_v1(
     question: str = Query(..., description="User's question"),
     count: Optional[int] = Query(3, ge=1, le=10, description="Number of matches to return"),
     include_related: Optional[bool] = Query(False, description="Include related question suggestion (adds latency)"),
@@ -391,7 +394,7 @@ class UpvoteQuestionRequest(BaseModel):
     question: str
 
 @router.get("/search/bm25", response_model=List[SearchResultItem])
-async def search_bm25(
+def search_bm25(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(5, ge=1, le=50, description="Number of results to return")
 ):
@@ -424,7 +427,7 @@ async def search_bm25(
 
 
 @router.get("/search/vector", response_model=List[SearchResultItem])
-async def search_vector(
+def search_vector(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(5, ge=1, le=50, description="Number of results to return")
 ):
@@ -459,7 +462,7 @@ async def search_vector(
 
 
 @router.get("/search/topic-entity", response_model=TopicEntitySearchResponse)
-async def search_topic_entity(
+def search_topic_entity(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(50, ge=1, le=100, description="Number of results to return")
 ):
@@ -501,7 +504,7 @@ async def search_topic_entity(
 
 
 @router.get("/search/llm-filtered", response_model=CombinedSearchResponse)
-async def llm_filtered_search(
+def llm_filtered_search(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(5, ge=1, le=20, description="Number of results to return")
 ):
@@ -571,7 +574,7 @@ async def llm_filtered_search(
 
 
 @router.get("/search/combined", response_model=CombinedSearchResponse)
-async def combined_search(
+def combined_search(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(5, ge=1, le=100, description="Number of results to return")
 ):
@@ -748,7 +751,7 @@ async def get_total_questions_count():
 
 
 @router.get("/search/compare", response_model=SearchComparisonResponse)
-async def compare_search_methods(
+def compare_search_methods(
     query: str = Query(..., description="Search query"),
     top_n: int = Query(10, ge=1, le=50, description="Number of results per method")
 ):
@@ -879,7 +882,7 @@ async def get_question_queue_endpoint(
         raise HTTPException(status_code=500, detail=f"Error fetching questions: {str(e)}")
 
 @router.get("/answers/v1/queue-info", response_model=QueueInfo)
-async def get_queue_info(
+def get_queue_info(
     question: str = Query(..., description="User's question")
 ):
     """

@@ -224,11 +224,11 @@ def upvote_question(question: str) -> Dict:
             raise
 
 def find_question_by_text(question: str) -> Optional[Dict]:
-    """Find a question by its text (case-insensitive)"""
+    """Find a question by its text (case-insensitive). Returns the full document."""
     container = get_cosmos_container()
     question_normalized = normalize_question(question)
     
-    # Support both old and new field names
+    # Support both old and new field names. Full document needed for upvote/replace.
     query = "SELECT * FROM c WHERE c.normalizedText = @normalized OR c.question_normalized = @normalized"
     parameters = [{"name": "@normalized", "value": question_normalized}]
     
@@ -238,6 +238,27 @@ def find_question_by_text(question: str) -> Optional[Dict]:
         enable_cross_partition_query=True
     ))
     
+    return items[0] if items else None
+
+
+def find_question_queue_status(question: str) -> Optional[Dict]:
+    """Lightweight lookup for queue status (existence + votes only)."""
+    container = get_cosmos_container()
+    question_normalized = normalize_question(question)
+
+    query = """
+    SELECT c.id, c.voteUp, c.votes, c.upvotes, c.questionText, c.question
+    FROM c
+    WHERE c.normalizedText = @normalized OR c.question_normalized = @normalized
+    """
+    parameters = [{"name": "@normalized", "value": question_normalized}]
+
+    items = list(container.query_items(
+        query=query,
+        parameters=parameters,
+        enable_cross_partition_query=True
+    ))
+
     return items[0] if items else None
 
 def get_question_by_id(question_id: str) -> Optional[Dict]:
