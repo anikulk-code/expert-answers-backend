@@ -122,6 +122,7 @@ class AnswersResponseV1(BaseModel):
     answers: List[AnswerResponse]
     relatedQuestion: Optional[str] = None
     relatedQuestions: Optional[List[str]] = None  # For fallback when no answers found
+    relatedAnswers: Optional[List[AnswerResponse]] = None  # Full payloads for related matches
     youtubeSearchResults: Optional[List[AnswerResponse]] = None  # For YouTube search fallback
     searchStatus: Optional[str] = None  # "answered", "related_only", "unanswered" (plus legacy values)
     searchStage: Optional[str] = None  # "searching_questions", "searching_videos", "checking_relevance", "complete"
@@ -280,6 +281,15 @@ def get_answers_v1(
         if matches:
             # Format response to match AnswerResponse model
             results = [_format_match_as_answer(match) for match in matches]
+            related_results = [
+                _format_match_as_answer(match) for match in related_matches
+            ]
+            if not related_questions and related_results:
+                related_questions = [
+                    result.get("questionTitle") or ""
+                    for result in related_results
+                    if result.get("questionTitle")
+                ]
             matched_question_texts = [
                 result.get("questionTitle") or "" for result in results
             ]
@@ -296,6 +306,7 @@ def get_answers_v1(
                 "answers": results,
                 "relatedQuestion": related_question,
                 "relatedQuestions": related_questions or None,
+                "relatedAnswers": related_results or None,
                 "youtubeSearchResults": None,
                 "searchStatus": "answered",
                 "searchStage": "complete",
@@ -330,6 +341,7 @@ def get_answers_v1(
             "answers": related_results,
             "relatedQuestion": None,
             "relatedQuestions": related_questions or None,
+            "relatedAnswers": related_results or None,
             "youtubeSearchResults": None,
             "searchStatus": "related_only" if related_results or related_questions else "unanswered",
             "searchStage": "complete",
