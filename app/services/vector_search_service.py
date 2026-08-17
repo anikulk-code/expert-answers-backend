@@ -10,6 +10,13 @@ from typing import List, Dict, Optional
 from app.services.cosmos_service import get_cosmos_container
 from app.services.llm_service import get_openai_client
 
+_DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "").lower() in ("1", "true", "yes")
+
+
+def _debug(*args, **kwargs):
+    if _DEBUG_SEARCH:
+        print(*args, **kwargs)
+
 
 def generate_query_embedding(query: str, model: str = "text-embedding-3-large") -> Optional[List[float]]:
     """
@@ -27,17 +34,16 @@ def generate_query_embedding(query: str, model: str = "text-embedding-3-large") 
     """
     try:
         openai_client = get_openai_client()
-        
-        # Use full query text for better semantic understanding
-        # This matches how stored embeddings are generated (from questionText, not canonical_text)
-        print(f"   📝 Generating embedding for query: '{query}'")
+        _debug(f"   Generating embedding for query: '{query}'")
         response = openai_client.embeddings.create(
             model=model,
             input=query
         )
-        
         embedding = response.data[0].embedding
-        print(f"   ✅ Generated embedding: length={len(embedding)}, first 3 values={embedding[:3] if len(embedding) >= 3 else embedding}")
+        _debug(
+            f"   Generated embedding: length={len(embedding)}, "
+            f"first 3 values={embedding[:3] if len(embedding) >= 3 else embedding}"
+        )
         return embedding
     except Exception as e:
         print(f"Error generating query embedding: {e}")
@@ -70,43 +76,30 @@ def vector_search_cosmos(
         List of question documents sorted by vector similarity
     """
     container = get_cosmos_container()
-    
-    # Log the actual query being used
-    print(f"🔍 Vector search called with query: '{query}'")
-    
-    # Generate embedding for query
+    _debug(f"Vector search called with query: '{query}'")
+
     query_embedding = generate_query_embedding(query, embedding_model)
     if not query_embedding:
-        print(f"❌ Failed to generate embedding for query: '{query}'")
+        print(f"Failed to generate embedding for query: '{query}'")
         return []
-    
-    # Log first few values of embedding to verify it's different for different queries
-    embedding_preview = query_embedding[:5] if len(query_embedding) >= 5 else query_embedding
-    print(f"   Generated embedding preview (first 5 values): {embedding_preview}")
-    print(f"   🔍 CRITICAL: Query='{query}', Embedding hash (first 10 values): {query_embedding[:10]}")
-    
-    # Validate embedding dimension
+
     if len(query_embedding) != embedding_dim:
-        print(f"Warning: Query embedding dimension ({len(query_embedding)}) doesn't match expected ({embedding_dim})")
+        print(
+            f"Warning: Query embedding dimension ({len(query_embedding)}) "
+            f"doesn't match expected ({embedding_dim})"
+        )
         return []
-    
+
     try:
-        # Use VectorDistance() function for vector search
-        # VectorDistance(embedding, @queryVector, 'cosine') returns distance
-        # Lower distance = more similar, so we order by distance ASC
-        print(f"🔍 Running vector search query...")
-        print(f"   Query embedding dimension: {len(query_embedding)}")
-        print(f"   Expected dimension: {embedding_dim}")
-        print(f"   Embedding model: {embedding_model}")
-        
-        # Add video_link filter based on require_video_link parameter
         if require_video_link:
-            # Only return questions that HAVE a video_link (answered questions)
-            video_link_filter = "AND IS_DEFINED(c.video_link) AND c.video_link != null AND c.video_link != ''"
+            video_link_filter = (
+                "AND IS_DEFINED(c.video_link) AND c.video_link != null AND c.video_link != ''"
+            )
         else:
-            # Only return questions that DON'T have a video_link (unanswered questions in queue)
-            video_link_filter = "AND (NOT IS_DEFINED(c.video_link) OR c.video_link = null OR c.video_link = '')"
-        
+            video_link_filter = (
+                "AND (NOT IS_DEFINED(c.video_link) OR c.video_link = null OR c.video_link = '')"
+            )
+
         # Select only fields needed downstream. Never return c.embedding
         # (3072 floats × top_n) — it is unused except for debug and dominates payload size.
         query_sql = f"""
@@ -127,97 +120,42 @@ def vector_search_cosmos(
             {video_link_filter}
         ORDER BY VectorDistance(c.embedding, @queryVector, @useExactSearch)
         """
-        
-        # Note: We're not filtering by embeddingModel in the WHERE clause
-        # to avoid potential issues. We'll filter in Python if needed.
-        
-        # Convert embedding to list (ensure it's a Python list, not numpy array or other type)
-        query_vector_list = list(query_embedding) if not isinstance(query_embedding, list) else query_embedding
-        
+
+        query_vector_list = (
+            list(query_embedding) if not isinstance(query_embedding, list) else query_embedding
+        )
+
         parameters = [
-            {"name": "@queryVector", "value": query_vector_list},  # Pass as list directly
+            {"name": "@queryVector", "value": query_vector_list},
             {"name": "@top_n", "value": top_n},
             {"name": "@embedding_dim", "value": embedding_dim},
             {"name": "@embedding_model", "value": embedding_model},
-            {"name": "@useExactSearch", "value": False}  # Use indexed search (faster). Set to True for exact brute-force search
+            {"name": "@useExactSearch", "value": False},
         ]
-        
-        print(f"   ✅ Using PARAMETERIZED vector - embedding length: {len(query_vector_list)}")
-        print(f"   First 3 values of parameterized vector: {query_vector_list[:3]}")
-        print(f"   Vector type: {type(query_vector_list)}, first element type: {type(query_vector_list[0]) if len(query_vector_list) > 0 else 'N/A'}")
-        
-        print(f"   Executing vector search SQL query...")
-        print(f"   Query SQL: {query_sql}")
-        print(f"   Parameters count: {len(parameters)}")
-        # Log parameter names and types (but not full vector values)
-        for param in parameters:
-            if param['name'] == '@queryVector':
-                vec_val = param['value']
-                print(f"   Parameter @queryVector: type={type(vec_val)}, length={len(vec_val) if hasattr(vec_val, '__len__') else 'N/A'}, first 3 values={vec_val[:3] if hasattr(vec_val, '__len__') and len(vec_val) >= 3 else 'N/A'}")
-            else:
-                print(f"   Parameter {param['name']}: {param['value']} (type: {type(param['value'])})")
-        try:
-            items = list(container.query_items(
-                query=query_sql,
-                parameters=parameters,
-                enable_cross_partition_query=True
-            ))
-            print(f"✅ Vector search query returned {len(items)} results")
-            if len(items) > 0:
-                print(f"   First result ID: {items[0].get('id', 'N/A')}")
-                print(f"   First result question: {items[0].get('questionText', 'N/A')[:60]}...")
-                print(f"   First result vector_distance: {items[0].get('vector_distance', 'N/A')}")
-                print(f"   First result topics: {items[0].get('topics', [])}")
-                # Log first 3 result IDs to check if they're all the same
-                if len(items) >= 3:
-                    print(f"   First 3 result IDs: {[item.get('id', 'N/A')[:8] + '...' for item in items[:3]]}")
-                    print(f"   First 3 distances: {[item.get('vector_distance', 'N/A') for item in items[:3]]}")
-                    print(f"   First 3 questions: {[item.get('questionText', 'N/A')[:50] + '...' for item in items[:3]]}")
-                # Verify the query vector is actually being used by checking if distances differ
-                distances = [item.get('vector_distance') for item in items if item.get('vector_distance') is not None]
-                if len(distances) > 1:
-                    print(f"   Distance range: min={min(distances):.4f}, max={max(distances):.4f}, unique_count={len(set(distances))}")
-        except Exception as query_error:
-            error_msg = str(query_error)
-            error_type = type(query_error).__name__
-            print(f"❌ Vector search query error:")
-            print(f"   Error type: {error_type}")
-            print(f"   Error message: {error_msg}")
-            import traceback
-            traceback.print_exc()
-            raise  # Re-raise the error
-        
-        # Convert distance to similarity score (1 - distance for cosine)
-        # Cosine distance ranges from 0 (identical) to 2 (opposite)
-        # Similarity = 1 - distance (ranges from -1 to 1, but typically 0 to 1)
+
+        _debug(f"Executing vector search (top_n={top_n}, dim={embedding_dim})")
+        items = list(container.query_items(
+            query=query_sql,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        _debug(f"Vector search returned {len(items)} results")
+
         results = []
-        print(f"   Converting {len(items)} results from distance to similarity score...")
-        for i, item in enumerate(items):
+        for item in items:
             distance = item.get("vector_distance", 2.0)
-            similarity = 1.0 - distance  # Convert distance to similarity
-            item["vector_score"] = float(similarity)
-            
-            # Log first 3 results for debugging
-            if i < 3:
-                print(f"   Result #{i+1}: distance={distance:.4f}, similarity={similarity:.4f}, question={item.get('questionText', 'N/A')[:50]}...")
-            
-            # Remove the temporary vector_distance field
+            item["vector_score"] = float(1.0 - distance)
             if "vector_distance" in item:
                 del item["vector_distance"]
             results.append(item)
-        
-        print(f"✅ Returning {len(results)} results with scores")
+
         return results
-    
+
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Error in vector search: {error_msg}")
-        # If VectorDistance() is not available (feature not enabled yet),
-        # fall back to empty results
+        print(f"Error in vector search: {error_msg}")
         if "VectorDistance" in error_msg or "vector" in error_msg.lower():
-            print("   → Vector Search feature may not be enabled yet, or vector index not created")
-            print("   → Check Azure Portal: Features > Vector Search for NoSQL API")
-            print("   → Vector indexes can only be applied to NEW containers")
+            print("   Vector Search feature may not be enabled yet, or vector index not created")
         else:
             import traceback
             traceback.print_exc()

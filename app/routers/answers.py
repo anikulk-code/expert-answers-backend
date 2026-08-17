@@ -335,8 +335,8 @@ def get_answers_v1(
                 for result in related_results
                 if result.get("questionTitle")
             ]
-        queue_info = _build_light_queue_info(question)
-
+        # Queue status is fetched on demand when the user clicks
+        # "Request this exact question" (see QueueSection → /queue-info).
         return {
             "answers": related_results,
             "relatedQuestion": None,
@@ -346,7 +346,7 @@ def get_answers_v1(
             "searchStatus": "related_only" if related_results or related_questions else "unanswered",
             "searchStage": "complete",
             "suggestedTags": None,
-            "queueInfo": queue_info,
+            "queueInfo": None,
             "userMessage": None,
             "searchTimings": search_timings,
         }
